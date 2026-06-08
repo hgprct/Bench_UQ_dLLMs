@@ -1,0 +1,61 @@
+# =========================
+# Python / Cache
+# =========================
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# =========================
+# Outputs / Experiments
+# =========================
+outputs*/
+
+runs/
+wandb/
+.locks/
+
+# =========================
+# Models / Checkpoints
+# =========================
+models--*/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+
+# =========================
+# OS / Editor
+# =========================
+.DS_Store
+.vscode/
+
+# =========================
+# LLM / Agents
+# =========================
+REVIEW.md
+CLAUDE.md
+.claude/
+.agents/
+
+# =========================
+# Environnement Local & Secrets
+# =========================
+.venv/
+.env
+
+# =========================
+# HPC / DALIA Spécifique
+# =========================
+# Conteneurs (GIGANTESQUE - NE JAMAIS COMMITTER)
+*.sif
+*.img
+# Journaux Slurm
+logs/
+*.out
+*.err
+# Artefacts locaux uv (gérés dans le conteneur désormais)
+uv.lock
+.python-version

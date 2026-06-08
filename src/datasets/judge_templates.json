@@ -1,0 +1,47 @@
+{
+  "triviaqa": {
+    "preamble": "Task : You evaluate whether the model response correctly answers the question.\nAccept conversational hedges if the core answer matches any reference alias.",
+    "fields_separator": "\n",
+    "source_label": "Question",
+    "reference_label": "Acceptable answers",
+    "candidate_label": "Response",
+    "instruction": "Answer only 0 (incorrect or uncommitted) or 1 (correct). Output a single digit, nothing else.",
+    "score_label": "Score:"
+  },
+  "wmt14_fr_en": {
+    "preamble": "Task : You evaluate the quality of a machine translation from French to English.",
+    "fields_separator": "\n\n",
+    "source_label": "French",
+    "reference_label": null,
+    "candidate_label": "English",
+    "instruction": "Ignore stylistic differences. Answer only 0 (critical semantic error or hallucination) or 1 (meaning preserved).\nOutput a single digit, nothing else.",
+    "score_label": "Score:"
+  },
+  "wmt14_de_en": {
+    "preamble": "Task : You evaluate the quality of a machine translation from German to English.",
+    "fields_separator": "\n\n",
+    "source_label": "German",
+    "reference_label": null,
+    "candidate_label": "English",
+    "instruction": "Ignore stylistic differences. Answer only 0 (critical semantic error or hallucination) or 1 (meaning preserved).\nOutput a single digit, nothing else.",
+    "score_label": "Score:"
+  },
+  "xsum": {
+    "preamble": "Task : You evaluate the consistency of a summary with the source document.",
+    "fields_separator": "\n\n",
+    "source_label": "Document",
+    "reference_label": null,
+    "candidate_label": "Summary",
+    "instruction": "No hallucinations or contradictions allowed. Answer only 0 (inconsistent) or 1 (consistent).\nOutput a single digit, nothing else.",
+    "score_label": "Score:"
+  },
+  "samsum": {
+    "preamble": "Task : You evaluate the consistency of a summary with the source dialogue.",
+    "fields_separator": "\n\n",
+    "source_label": "Dialogue",
+    "reference_label": null,
+    "candidate_label": "Summary",
+    "instruction": "No hallucinations or contradictions allowed. Answer only 0 (inconsistent) or 1 (consistent).\nOutput a single digit, nothing else.",
+    "score_label": "Score:"
+  }
+}

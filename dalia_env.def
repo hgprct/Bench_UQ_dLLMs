@@ -1,0 +1,46 @@
+# dalia_env.def
+
+Bootstrap: localimage
+From: /lustre/work/pdl16831/udld187d1/stage/containers/ngc_pytorch_25.04_arm64.sif
+
+%files
+    requirements.in /opt/requirements.in
+
+%post
+    export DEBIAN_FRONTEND=noninteractive
+    export VLLM_FLASH_ATTN_VERSION=2
+
+    # 1. Install uv
+    python -m pip install --no-cache-dir uv --break-system-packages
+
+    # 2. Install standard requirements via uv
+    uv pip install --system --break-system-packages -r /opt/requirements.in
+
+    # ==========================================
+    # 3. SPECIAL HANDLING FOR vLLM ON ARM64
+    # ==========================================
+    cd /opt
+    git clone --depth 1 --branch v0.9.0 https://github.com/vllm-project/vllm.git
+    cd vllm
+
+    python use_existing_torch.py
+
+    uv pip install --system --break-system-packages "setuptools<77.0.0" setuptools-rust wheel ninja cmake setuptools_scm
+
+    sed -i '/^license/d' pyproject.toml
+
+    export MAX_JOBS=4
+    export TORCH_CUDA_ARCH_LIST="10.0"
+    python -m pip install -v --no-build-isolation --no-deps --break-system-packages -e .
+
+    # ==========================================
+
+    uv pip freeze --system > /opt/requirements_arm64_freeze.txt
+
+    uv cache clean
+    rm -rf /opt/vllm/.git
+
+%environment
+    export LC_ALL=C
+    export PATH=/usr/local/bin:$PATH
+    export VLLM_FLASH_ATTN_VERSION=2

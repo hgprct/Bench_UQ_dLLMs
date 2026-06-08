@@ -1,0 +1,21 @@
+{
+  "model_family": "DLM",
+  "model_id": "GSAI-ML/LLaDA-8B-Instruct",
+  "model_backend": "llada",
+  "dataset": "triviaqa",
+  "dataset_config_name": "rc",
+  "split": "validation",
+  "batch_size": 32,
+  "num_questions": 1000,
+  "gen_length": 32,
+  "steps": 32,
+  "remasking": "rd",
+  "temperature": 1.0,
+  "num_response_samples": 20,
+  "generate_greedy": true,
+  "topk_trace_k": 64,
+  "cfg_scale": 0.0,
+  "fewshot_k": 0,
+  "save_full_trace": true,
+  "confidence_eos_eot_inf": false
+}

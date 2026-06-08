@@ -1,0 +1,50 @@
+{
+  "triviaqa": {
+    "general_instruction": "",
+    "examples_introduction": "",
+    "question_prefix": "Question: ",
+    "answer_prefix": "Answer: ",
+    "fewshot_intro_sep": "\n\n",
+    "fewshot_answer_sep": ""
+  },
+  "gsm8k": {
+    "general_instruction": "Given the following question, reason and give a final answer to the question. Your response should end with \"#### [answer]\" where [answer] is the response to the question.",
+    "examples_introduction": "Here are some examples:",
+    "question_prefix": "Question: ",
+    "answer_prefix": "Answer: ",
+    "fewshot_intro_sep": "\n\n",
+    "fewshot_answer_sep": ""
+  },
+  "wmt14_fr_en": {
+    "general_instruction": "Translate the following French text into English, give only the translation.",
+    "examples_introduction": "Here are some examples:",
+    "question_prefix": "Original: ",
+    "answer_prefix": "Translation: ",
+    "fewshot_intro_sep": "\n\n",
+    "fewshot_answer_sep": ""
+  },
+  "wmt14_de_en": {
+    "general_instruction": "Translate the following German text into English, give only the translation.",
+    "examples_introduction": "Here are some examples:",
+    "question_prefix": "Original: ",
+    "answer_prefix": "Translation: ",
+    "fewshot_intro_sep": "\n\n",
+    "fewshot_answer_sep": ""
+  },
+  "xsum": {
+    "general_instruction": "Provide a summary for the following text. The summary should (1) be rather short, (2) extract important pieces of information",
+    "examples_introduction": "Here are some examples:",
+    "question_prefix": "Here's the text:\n",
+    "answer_prefix": "(End of text).\n\nSummary:\n",
+    "fewshot_intro_sep": "\n",
+    "fewshot_answer_sep": " "
+  },
+  "samsum": {
+    "general_instruction": "Provide a summary for the following dialogue. The summary should (1) be rather short, (2) extract important pieces of information, (3) include names of interlocutors, (4) be written in the third person.",
+    "examples_introduction": "Here are some examples:",
+    "question_prefix": "Here's the dialogue:\n\n",
+    "answer_prefix": "(End of dialogue).\n\nSummary:\n",
+    "fewshot_intro_sep": "\n",
+    "fewshot_answer_sep": " "
+  }
+}
