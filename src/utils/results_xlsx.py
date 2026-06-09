@@ -28,8 +28,11 @@ DATASET_TITLES = {
     "triviaqa": "TriviaQA",
     "gsm8k": "GSM8K",
     "wmt14_fr_en": "WMT14 fr-en",
+    "wmt14_de_en": "WMT14 de-en",
     "xsum": "XSum",
     "samsum": "SamSum",
+    "hotpotqa": "HotpotQA",
+    "musique": "MuSiQue",
 }
 
 HEADER_FIELDS = [

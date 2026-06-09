@@ -25,6 +25,7 @@ checkpoints/
 *.ckpt
 *.safetensors
 *.bin
+musique_data_v1.0/
 
 # =========================
 # OS / Editor

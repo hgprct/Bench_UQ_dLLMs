@@ -21,8 +21,10 @@ def parse_judge_score(text: Any) -> bool | None:
 
 def response_text(record: dict[str, Any]) -> str:
     """Extract candidate response text from a record."""
-    final = record.get("final", {})
-    return str(final.get("answer", final.get("response", "")) or "")
+    raw = record.get("raw_answer")
+    if raw is not None:
+        return str(raw).strip()
+    return ""
 
 
 def judge_label_records_batch(
@@ -32,10 +34,11 @@ def judge_label_records_batch(
     parse_judge_output: Callable[[Any], bool | None],
 ) -> tuple[list[bool | None], set[int]]:
     """Label records using an LLM judge with one retry for ambiguous outputs."""
+    assert evaluator is not None, "Evaluator model must be provided for judge labeling"
     labels: list[bool | None] = [None] * len(records)
     judge_indices: list[int] = []
     for i, record in enumerate(records):
-        if not response_text(record).strip():
+        if response_text(record) == "":
             labels[i] = False
         else:
             judge_indices.append(i)

@@ -68,7 +68,7 @@ def build_feature_rows(
             greedy, sampled = _partition_greedy_sampled(group)
             row: dict[str, Any] = {
                 "prompt_id": prompt_id,
-                "is_correct": greedy.get("final", {}).get("is_correct") if greedy else None,
+                "is_correct": greedy.get("label") if greedy else None,
             }
 
             if greedy and traces:
@@ -168,6 +168,9 @@ def _partition_greedy_sampled(records: list[dict]) -> tuple[dict | None, list[di
 
 def _final_answer(record: dict) -> str:
     """Extract the final answer text from a record."""
+    raw = record.get("raw_answer")
+    if raw is not None:
+        return str(raw).strip()
     final = record.get("final", {})
     return str(final.get("answer", final.get("response", ""))).strip()
 

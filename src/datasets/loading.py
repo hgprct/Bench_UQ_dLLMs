@@ -8,7 +8,6 @@ from typing import Any
 
 def load_hf_dataset(
     hf_name: str,
-    *,
     split: str,
     config_name: str | None = None,
     token: str | None = None,
@@ -22,7 +21,6 @@ def load_hf_dataset(
 
 def load_local_dataset(
     path: str | Path,
-    *,
     file_format: str = "jsonl",
 ) -> list[dict[str, Any]]:
     """Load a dataset from a local file (jsonl or json)."""

@@ -12,7 +12,6 @@ import sys
 from pathlib import Path
 
 from src.config import (
-    DATASET_DEFAULTS,
     MODEL_BACKENDS,
     MODEL_HF_IDS,
     Dataset,
@@ -66,8 +65,6 @@ def main(argv: list[str] | None = None) -> None:
     model = Model(args.model)
     dataset = Dataset(args.dataset)
     remasking = Remasking(args.remasking)
-    ds_defaults = DATASET_DEFAULTS[dataset]
-
     fewshot_k = args.fewshot_k
     rid = build_run_id(model, dataset, args.length, args.steps, remasking,
                         temperature=args.temperature if args.temperature != 1.0 else None,

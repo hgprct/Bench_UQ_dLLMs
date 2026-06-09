@@ -39,8 +39,8 @@ def _discover_runs(folder: Path, exclude: set[str]) -> list[Path]:
 
 
 def _print_accuracy(records: list[dict], name: str) -> None:
-    correct = sum(1 for r in records if r.get("final", {}).get("is_correct") is True)
-    total = sum(1 for r in records if r.get("final", {}).get("is_correct") is not None)
+    correct = sum(1 for r in records if r.get("label") is True)
+    total = sum(1 for r in records if r.get("label") is not None)
     if total > 0:
         print(f"[label_all] {name} accuracy: {correct}/{total} = {correct / total:.3f}")
     else:
@@ -57,17 +57,16 @@ def _label_run(
     force: bool = False,
 ) -> None:
     from src.utils.io import read_jsonl
-    from src.registry import get_dataset_module
+    from src.config import DATASET_CONFIGS, Dataset
     from src.labeling import label_records
 
-    dataset_module = get_dataset_module(dataset_key)
+    ds_config = DATASET_CONFIGS[Dataset(dataset_key)]
     records = read_jsonl(run_dir / "examples.jsonl")
 
-    method = getattr(dataset_module, "DEFAULT_LABEL_METHOD", "llm_judge")
-    print(f"[label_all] {run_dir.name}: {len(records)} records, method='{method}'")
+    print(f"[label_all] {run_dir.name}: {len(records)} records, method='{ds_config.label_method}'")
 
     labeled = label_records(
-        records, dataset_module,
+        records, dataset_key,
         judge_model=judge_model,
         judge_tp=judge_tp,
         evaluator=evaluator,
@@ -97,18 +96,16 @@ def main(argv: list[str] | None = None) -> None:
 
     print(f"[label_all] Found {len(runs)} run(s) to label")
 
-    from src.registry import get_dataset_module
-
     gpu_runs: list[tuple[Path, str]] = []
     cpu_runs: list[tuple[Path, str]] = []
 
+    from src.config import DATASET_CONFIGS, Dataset
     for run_dir in runs:
         with open(run_dir / "config.json") as f:
             config = json.load(f)
         dataset_key = config.get("dataset", "triviaqa")
-        dataset_module = get_dataset_module(dataset_key)
-        gpu_mode = getattr(dataset_module, "LABEL_GPU_MODE", "gpu")
-        if gpu_mode == "gpu":
+        ds_config = DATASET_CONFIGS[Dataset(dataset_key)]
+        if ds_config.label_gpu_mode == "gpu":
             gpu_runs.append((run_dir, dataset_key))
         else:
             cpu_runs.append((run_dir, dataset_key))

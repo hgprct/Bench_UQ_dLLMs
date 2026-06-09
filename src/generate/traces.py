@@ -21,6 +21,7 @@ def save_trace_collection(
     dataset_key: str,
     eos_token_ids: list[int],
     pad_token_id: int | None = None,
+    parse_answer: Any = None,
 ) -> dict[str, Any]:
     """Write config.json, examples.jsonl, traces.npz, and metadata.json."""
     os.makedirs(output_dir, exist_ok=True)
@@ -36,6 +37,7 @@ def save_trace_collection(
 
     examples = build_trace_example_records(
         qa_pairs, prompts, rich_traces, tokenizer, dataset_key,
+        parse_answer=parse_answer,
     )
 
     config["num_examples"] = len(examples)
@@ -82,7 +84,7 @@ def save_trace_collection(
     }
 
 
-def build_trace_example_records(qa_pairs, prompts, rich_traces, tokenizer, dataset_key):
+def build_trace_example_records(qa_pairs, prompts, rich_traces, tokenizer, dataset_key, parse_answer=None):
     """Build JSONL example records with decoded strings per step."""
     response_token_ids = rich_traces["response_token_ids"]
     x0_pred_token_ids = rich_traces["x0_pred_token_ids"]
@@ -104,10 +106,6 @@ def build_trace_example_records(qa_pairs, prompts, rich_traces, tokenizer, datas
 
     records = []
     for sample_id, qa_item in enumerate(qa_pairs):
-        question = qa_item.get("question", "") if isinstance(qa_item, dict) else ""
-        ref = qa_item.get("reference_answer", "") if isinstance(qa_item, dict) else ""
-        aliases = qa_item.get("aliases", []) if isinstance(qa_item, dict) else []
-
         base = sample_id * num_steps
         final_response = r_decoded[base + num_steps - 1].strip()
 
@@ -120,21 +118,21 @@ def build_trace_example_records(qa_pairs, prompts, rich_traces, tokenizer, datas
             for step_i in range(num_steps)
         ]
 
-        record = {
+        parsed = parse_answer(final_response) if parse_answer else None
+
+        record = dict(qa_item) if isinstance(qa_item, dict) else {}
+        if not record.get("aliases"):
+            record["aliases"] = [record.get("reference_answer", "")]
+        record.update({
             "example_id": _example_id(qa_item, sample_id),
             "sample_id": sample_id,
             "dataset": dataset_key,
-            "question": question,
-            "reference_answer": ref,
-            "aliases": list(aliases) if aliases else [ref],
+            "raw_answer": final_response,
+            "parsed_answer": parsed,
             "prompt": prompts[sample_id],
             "final": {"response": final_response},
             "steps": steps,
-        }
-        for field in ("qa_index", "response_sample_id", "num_response_samples", "qa_example_id", "generation_mode"):
-            val = qa_item.get(field) if isinstance(qa_item, dict) else None
-            if val is not None:
-                record[field] = int(val) if field not in ("qa_example_id", "generation_mode") else str(val)
+        })
         records.append(record)
     return records
 
@@ -170,6 +168,7 @@ def _build_trace_config(run_config, dataset_key, num_examples, eos_token_ids, pa
         "model_backend": run_config.get("model_backend", "llada"),
         "dataset": dataset_key,
         "split": run_config.get("split"),
+        "label_method": run_config.get("label_method"),
         "num_examples": num_examples,
         "num_questions": int(run_config.get("num_questions", num_examples)),
         "num_response_samples": int(run_config.get("num_response_samples", 1)),

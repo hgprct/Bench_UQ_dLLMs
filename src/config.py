@@ -1,7 +1,7 @@
-"""Single source of truth for model, dataset, and remasking definitions.
+"""Single source of truth for all pipeline configuration.
 
-All canonical names, HuggingFace IDs, backend types, and dataset defaults
-live here. No aliases -- use the exact enum values everywhere.
+All canonical names, HuggingFace IDs, backend types, dataset-specific settings,
+and generation defaults live here. No aliases -- use exact enum values everywhere.
 """
 
 from __future__ import annotations
@@ -13,23 +13,28 @@ from pathlib import Path
 from typing import Any
 
 
+# ---------------------------------------------------------------------------
+# Enumerations
+# ---------------------------------------------------------------------------
+
 class Model(str, Enum):
     """Supported diffusion language models."""
-    LLaDA = "LLaDA"
-    LLaDA15 = "LLaDA1.5"
-    Dream = "Dream"
+    LLaDA    = "LLaDA"
+    LLaDA15  = "LLaDA1.5"
+    Dream    = "Dream"
     Nemotron = "Nemotron"
 
 
 class Dataset(str, Enum):
     """Supported evaluation datasets."""
-    triviaqa = "triviaqa"
-    gsm8k = "gsm8k"
+    triviaqa    = "triviaqa"
+    gsm8k       = "gsm8k"
     wmt14_fr_en = "wmt14_fr_en"
-    xsum = "xsum"
-    samsum = "samsum"
-    hotpotqa = "hotpotqa"
-    musique = "musique"
+    wmt14_de_en = "wmt14_de_en"
+    xsum        = "xsum"
+    samsum      = "samsum"
+    hotpotqa    = "hotpotqa"
+    musique     = "musique"
 
 
 class Remasking(str, Enum):
@@ -38,17 +43,21 @@ class Remasking(str, Enum):
     rd = "rd"
 
 
+# ---------------------------------------------------------------------------
+# Model configuration
+# ---------------------------------------------------------------------------
+
 MODEL_HF_IDS: dict[Model, str] = {
-    Model.LLaDA: "GSAI-ML/LLaDA-8B-Instruct",
-    Model.LLaDA15: "GSAI-ML/LLaDA-1.5",
-    Model.Dream: "Dream-org/Dream-v0-Instruct-7B",
+    Model.LLaDA:    "GSAI-ML/LLaDA-8B-Instruct",
+    Model.LLaDA15:  "GSAI-ML/LLaDA-1.5",
+    Model.Dream:    "Dream-org/Dream-v0-Instruct-7B",
     Model.Nemotron: "nvidia/Nemotron-Labs-Diffusion-8B",
 }
 
 MODEL_BACKENDS: dict[Model, str] = {
-    Model.LLaDA: "llada",
-    Model.LLaDA15: "llada",
-    Model.Dream: "dream",
+    Model.LLaDA:    "llada",
+    Model.LLaDA15:  "llada",
+    Model.Dream:    "dream",
     Model.Nemotron: "nemotron",
 }
 
@@ -58,82 +67,132 @@ REMASKING_FULL_NAMES: dict[Remasking, str] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Dataset configuration
+# ---------------------------------------------------------------------------
+
 @dataclass(frozen=True)
-class DatasetDefaults:
-    """Default configuration for a dataset."""
-    hf_name: str
-    config_name: str | None
-    split: str
-    batch_size: int
-    default_label_method: str
-    label_gpu_mode: str
-    fewshot_k: int = 0
+class DatasetConfig:
+    """Complete configuration for one dataset."""
+    hf_name:        str        # HuggingFace dataset identifier (empty string if loading locally)
+    local_path:     str | None # Local file path; takes precedence over hf_name when set
+    config_name:    str | None # HuggingFace dataset config variant (e.g. "rc", "fr-en")
+    split:          str        # Default split to use (train / validation / test)
+    label_method:   str        # "exact_match" or "llm_judge"
+    label_gpu_mode: str        # "cpu" or "gpu" — whether labeling requires a GPU-hosted judge
+    fewshot_k:      int        # Default number of few-shot examples to prepend
+    batch_size:     int        # Default generation batch size
 
 
-def _defaults_from_adapter(dataset: Dataset, batch_size: int = 16) -> DatasetDefaults:
-    """Derive DatasetDefaults from the adapter module's constants."""
-    from src.registry import get_dataset_module
-    mod = get_dataset_module(dataset.value)
-    return DatasetDefaults(
-        hf_name=getattr(mod, "HF_NAME"),
-        config_name=getattr(mod, "DEFAULT_CONFIG_NAME", None),
-        split=getattr(mod, "DEFAULT_SPLIT", "test"),
-        batch_size=batch_size,
-        default_label_method=getattr(mod, "DEFAULT_LABEL_METHOD", "llm_judge"),
-        label_gpu_mode=getattr(mod, "LABEL_GPU_MODE", "gpu"),
-        fewshot_k=getattr(mod, "FEWSHOT_K", 0),
-    )
-
-
-_DATASET_BATCH_SIZES: dict[Dataset, int] = {
-    Dataset.triviaqa: 32,
-    Dataset.gsm8k: 16,
-    Dataset.wmt14_fr_en: 16,
-    Dataset.xsum: 16,
-    Dataset.samsum: 16,
-    Dataset.hotpotqa: 16,
-    Dataset.musique: 16,
+DATASET_CONFIGS: dict[Dataset, DatasetConfig] = {
+    Dataset.gsm8k: DatasetConfig(
+        hf_name        = "openai/gsm8k",
+        local_path     = None,
+        config_name    = "main",
+        split          = "test",
+        label_method   = "exact_match",
+        label_gpu_mode = "cpu",
+        fewshot_k      = 4,
+        batch_size     = 16,
+    ),
+    Dataset.triviaqa: DatasetConfig(
+        hf_name        = "mandarjoshi/trivia_qa",
+        local_path     = None,
+        config_name    = "rc",
+        split          = "validation",
+        label_method   = "llm_judge",
+        label_gpu_mode = "gpu",
+        fewshot_k      = 0,
+        batch_size     = 32,
+    ),
+    Dataset.wmt14_fr_en: DatasetConfig(
+        hf_name        = "wmt/wmt14",
+        local_path     = None,
+        config_name    = "fr-en",
+        split          = "test",
+        label_method   = "llm_judge",
+        label_gpu_mode = "gpu",
+        fewshot_k      = 0,
+        batch_size     = 16,
+    ),
+    Dataset.wmt14_de_en: DatasetConfig(
+        hf_name        = "wmt/wmt14",
+        local_path     = None,
+        config_name    = "de-en",
+        split          = "test",
+        label_method   = "llm_judge",
+        label_gpu_mode = "gpu",
+        fewshot_k      = 0,
+        batch_size     = 16,
+    ),
+    Dataset.xsum: DatasetConfig(
+        hf_name        = "EdinburghNLP/xsum",
+        local_path     = None,
+        config_name    = None,
+        split          = "test",
+        label_method   = "llm_judge",
+        label_gpu_mode = "gpu",
+        fewshot_k      = 0,
+        batch_size     = 16,
+    ),
+    Dataset.samsum: DatasetConfig(
+        hf_name        = "knkarthick/samsum",
+        local_path     = None,
+        config_name    = None,
+        split          = "test",
+        label_method   = "llm_judge",
+        label_gpu_mode = "gpu",
+        fewshot_k      = 0,
+        batch_size     = 16,
+    ),
+    Dataset.hotpotqa: DatasetConfig(
+        hf_name        = "hotpotqa/hotpot_qa",
+        local_path     = None,
+        config_name    = "fullwiki",
+        split          = "validation",
+        label_method   = "llm_judge",
+        label_gpu_mode = "gpu",
+        fewshot_k      = 0,
+        batch_size     = 16,
+    ),
+    Dataset.musique: DatasetConfig(
+        hf_name        = "",
+        local_path     = "musique_data_v1.0/data/musique_full_v1.0_dev.jsonl",
+        config_name    = None,
+        split          = "train",
+        label_method   = "llm_judge",
+        label_gpu_mode = "gpu",
+        fewshot_k      = 0,
+        batch_size     = 16,
+    ),
 }
 
-_DATASET_DEFAULTS_CACHE: dict[Dataset, DatasetDefaults] | None = None
+
+# ---------------------------------------------------------------------------
+# Generation defaults
+# ---------------------------------------------------------------------------
+
+GENERATION_DEFAULTS: dict[str, Any] = {
+    "model_id":               "GSAI-ML/LLaDA-8B-Instruct",
+    "seed":                   42,
+    "steps":                  128,
+    "gen_length":             128,
+    "temperature":            0.0,
+    "remasking":              "lc",
+    "batch_size":             8,
+    "topk_trace_k":           64,
+    "num_response_samples":   20,
+    "generate_greedy":        True,
+    "num_questions":          1000,
+    "fewshot_k":              0,
+    "logits_eos_inf":         False,
+    "confidence_eos_eot_inf": False,
+}
 
 
-def _get_dataset_defaults() -> dict[Dataset, DatasetDefaults]:
-    global _DATASET_DEFAULTS_CACHE
-    if _DATASET_DEFAULTS_CACHE is None:
-        _DATASET_DEFAULTS_CACHE = {
-            ds: _defaults_from_adapter(ds, _DATASET_BATCH_SIZES.get(ds, 16))
-            for ds in Dataset
-        }
-    return _DATASET_DEFAULTS_CACHE
-
-
-class _DatasetDefaultsProxy:
-    """Dict-like proxy that lazily builds DATASET_DEFAULTS on first access."""
-
-    def __getitem__(self, key: Dataset) -> DatasetDefaults:
-        return _get_dataset_defaults()[key]
-
-    def __contains__(self, key: object) -> bool:
-        return key in _get_dataset_defaults()
-
-    def __iter__(self):
-        return iter(_get_dataset_defaults())
-
-    def items(self):
-        return _get_dataset_defaults().items()
-
-    def values(self):
-        return _get_dataset_defaults().values()
-
-    def keys(self):
-        return _get_dataset_defaults().keys()
-
-    def get(self, key, default=None):
-        return _get_dataset_defaults().get(key, default)
-
-
-DATASET_DEFAULTS: Any = _DatasetDefaultsProxy()
+# ---------------------------------------------------------------------------
+# Run ID / config filename helpers
+# ---------------------------------------------------------------------------
 
 def run_id(
     model: Model,
@@ -192,28 +251,29 @@ def build_generation_config(
     **overrides: Any,
 ) -> dict[str, Any]:
     """Build a complete generation config from canonical parameters."""
-    ds = DATASET_DEFAULTS[dataset]
+    ds = DATASET_CONFIGS[dataset]
     resolved_fewshot_k = ds.fewshot_k if fewshot_k is None else fewshot_k
     config: dict[str, Any] = {
-        "model_family": "DLM",
-        "model_id": MODEL_HF_IDS[model],
-        "model_backend": MODEL_BACKENDS[model],
-        "dataset": dataset.value,
-        "dataset_config_name": ds.config_name,
-        "split": ds.split,
-        "batch_size": ds.batch_size,
-        "num_questions": num_questions,
-        "gen_length": length,
-        "steps": steps,
-        "remasking": remasking.value,
-        "temperature": temperature,
-        "num_response_samples": num_response_samples,
-        "generate_greedy": generate_greedy,
-        "topk_trace_k": topk_trace_k,
-        "fewshot_k": resolved_fewshot_k,
-        "save_full_trace": True,
+        "model_family":          "DLM",
+        "model_id":              MODEL_HF_IDS[model],
+        "model_backend":         MODEL_BACKENDS[model],
+        "dataset":               dataset.value,
+        "dataset_config_name":   ds.config_name,
+        "split":                 ds.split,
+        "label_method":          ds.label_method,
+        "batch_size":            ds.batch_size,
+        "num_questions":         num_questions,
+        "gen_length":            length,
+        "steps":                 steps,
+        "remasking":             remasking.value,
+        "temperature":           temperature,
+        "num_response_samples":  num_response_samples,
+        "generate_greedy":       generate_greedy,
+        "topk_trace_k":          topk_trace_k,
+        "fewshot_k":             resolved_fewshot_k,
+        "save_full_trace":       True,
         "confidence_eos_eot_inf": confidence_eos_eot_inf,
-        "cfg_scale": cfg_scale,
+        "cfg_scale":             cfg_scale,
     }
     config.update(overrides)
     return config

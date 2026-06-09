@@ -2,190 +2,90 @@
 
 from __future__ import annotations
 
-import re
-import string
-from typing import Any, Sequence
+from typing import Any
 
-from src.datasets.qa_pair import QASample, as_qa_row
-from src.utils.text import normalize_key, normalize_text
+from src.datasets.qa_pair import QASample
 from src.labeling.judge import parse_judge_score
 
-HF_NAME = "hotpot_qa"
-DEFAULT_CONFIG_NAME = "distractor"
-DEFAULT_SPLIT = "validation"
-DEFAULT_LABEL_METHOD = "llm_judge"
-LABEL_GPU_MODE = "gpu"
-FEWSHOT_K = 0
 
-_ARTICLES_RE = re.compile(r"\b(a|an|the)\b")
-_PUNCTUATION = set(string.punctuation + "‘’´`")
-_SHORT_ANSWER_PATTERNS = (
-    re.compile(r"^the answer is\s+(.+)$", flags=re.IGNORECASE),
-    re.compile(r"^answer:\s*(.+)$", flags=re.IGNORECASE),
-    re.compile(r"^final answer:\s*(.+)$", flags=re.IGNORECASE),
-)
-
-
-def _build_context_block(example: dict[str, Any]) -> str:
-    titles = example.get("context", {}).get("title", [])
-    sentences_list = example.get("context", {}).get("sentences", [])
-    if not titles or not sentences_list:
-        return ""
-    paragraphs = []
-    for title, sentences in zip(titles, sentences_list):
-        text = "".join(sentences).strip()
-        if text:
-            paragraphs.append(f"[{title}]\n{text}")
-    return "\n\n".join(paragraphs)
-
-
-def extract_question_and_answer(example: dict[str, Any]) -> QASample:
+# Data building functions
+def extract_qa_sample(example: dict[str, Any]) -> QASample:
+    """Extract question and answer from a HotpotQA example for dataset creation."""
     question = str(example.get("question", "")).strip()
     answer = str(example.get("answer", "")).strip()
-    context_block = _build_context_block(example)
+    context_raw = example.get("context", None)
+    assert context_raw is not None, "Expected 'context' key in example"
 
-    extra: dict[str, Any] = {
-        "task_type": "multi_hop_qa",
-        "context": context_block,
-        "level": example.get("level", ""),
-        "type": example.get("type", ""),
-    }
-    doc_id = example.get("id")
-    if doc_id is not None:
-        extra["id"] = doc_id
+    titles_list = context_raw.get("title", [])
+    sentences_list = context_raw.get("sentences", [])
+    
+    if len(titles_list) == 0:
+        print("Expected 'title' list in context to be non-empty")
+        return None
+    assert len(titles_list) == len(sentences_list), "Expected 'title' and 'sentences' lists to be of the same length"
+    
+    context_list = []
+    for title, sentences in zip(titles_list, sentences_list):
+        context_doc = {"title": title, "sentences": "".join(sentences)}
+        context_list.append(context_doc)
 
-    supporting = example.get("supporting_facts")
-    if supporting:
-        extra["supporting_facts"] = supporting
-
-    return as_qa_row(
-        question,
-        answer,
-        aliases=[answer],
-        fewshot_answer=answer,
-        **extra,
+    return QASample(
+        question=question,
+        reference_answer=answer,
+        source_documents=context_list,
+        id=str(example.get("id", None))
     )
 
 
+# Generation functions
 def format_prompt(
-    question: str,
-    prefix: str | None = None,
-    choices: Sequence[dict[str, str]] | None = None,
-    *,
-    context: str | None = None,
+    qa_sample: QASample,
+    fewshot_prefix: str | None = None,
 ) -> str:
-    parts = [
-        "Answer the following question based on the provided supporting documents. "
-        "Read all documents carefully and combine information from multiple "
-        "documents if needed.",
-    ]
+    """Format a prompt for HotpotQA."""
+    prompt = "The following are the given documents:\n\n"
 
-    if context:
-        parts.append(f"Supporting documents:\n\n{context}")
+    for i, doc in enumerate(qa_sample.get("source_documents", [])):
+        title = doc.get("title", "")
+        sentences = doc.get("sentences", [])
+        prompt += f"Document {i}: {title}\n"
+        prompt +=  sentences + "\n\n"
 
-    if prefix:
-        parts.append(str(prefix).strip())
+    prompt += "Answer the question based strictly on the provided documents.\n\n"
 
-    parts.append(f"Question: {str(question).strip()}\nAnswer:")
+    if fewshot_prefix:
+        prompt += fewshot_prefix
 
-    return "\n\n".join(parts).strip()
-
-
-def few_shot_prefix(few_shot_examples: list[dict[str, Any]] | None = None) -> str:
-    if not few_shot_examples:
-        return ""
-    examples = []
-    for ex in few_shot_examples:
-        q = str(ex.get("question", "")).strip()
-        a = str(ex.get("answer", "")).strip()
-        examples.append(f"Question: {q}\nAnswer: {a}")
-    return "Here are some examples:\n\n" + "\n\n".join(examples)
+    prompt += f"Question: {qa_sample['question']}\nAnswer:"
+    return prompt
 
 
-def normalize_answer(text: Any) -> str:
-    text = str(text).replace("_", " ").lower()
-    text = "".join(" " if char in _PUNCTUATION else char for char in text)
-    text = _ARTICLES_RE.sub(" ", text)
-    return " ".join(text.split()).strip()
+def few_shot_prefix(few_shot_examples: list[QASample] | None = None) -> str:
+    """Format a few-shot prefix for HotpotQA."""
+    prefix = ""
+    for example in few_shot_examples or []:
+        prefix += f"Question: {example['question']}\nAnswer: {example['reference_answer']}\n\n"
+    return prefix
 
 
-def extract_short_answer(text: Any) -> str:
-    text = str(text).strip()
-    for pattern in _SHORT_ANSWER_PATTERNS:
-        match = pattern.match(text)
-        if match:
-            return match.group(1).strip()
-    lines = text.strip().splitlines()
-    if lines:
-        last = lines[-1].strip()
-        if last:
-            return last
-    return text
-
-
-def parse_response(response: Any) -> str:
-    raw = str(response).strip()
-    for pattern in _SHORT_ANSWER_PATTERNS:
-        match = pattern.match(raw)
-        if match:
-            return match.group(1).strip()
-    return raw
-
-
-def cluster_key(response: Any, sample: QASample | None = None) -> str:
-    del sample
-    return normalize_key(normalize_answer(parse_response(response)))
-
-
-def _f1_score(prediction: str, gold: str) -> float:
-    pred_tokens = normalize_answer(prediction).split()
-    gold_tokens = normalize_answer(gold).split()
-    if not pred_tokens or not gold_tokens:
-        return float(pred_tokens == gold_tokens)
-    common = set(pred_tokens) & set(gold_tokens)
-    if not common:
-        return 0.0
-    precision = len(common) / len(pred_tokens)
-    recall = len(common) / len(gold_tokens)
-    return 2 * precision * recall / (precision + recall)
-
-
-def exact_match_correct(prediction: str, gold_answers: Sequence[Any]) -> bool:
-    pred_norm = normalize_answer(prediction)
-    return any(pred_norm == normalize_answer(str(g)) for g in gold_answers)
-
-
-def build_judge_prompt(record: dict[str, Any]) -> str:
-    question = record.get("question", "")
-    context = record.get("context", "")
-
-    ref = record.get("reference_answer", "")
-    aliases = record.get("aliases", [ref]) if record.get("aliases") else [ref]
-    refs = ", ".join(str(a) for a in aliases if a)
-
-    final = record.get("final", {})
-    candidate = str(final.get("answer", final.get("response", "")) or "")
-
-    parts = [
-        "Task: You evaluate whether the model response correctly answers a "
-        "multi-hop question. The question requires combining information from "
-        "the provided context documents.",
-    ]
-
-    if context:
-        parts.append(f"Context:\n{context}")
-
-    parts.append(f"Question: {question}")
-    parts.append(f"Acceptable answers: {refs}")
-    parts.append(f"Response: {candidate}")
-    parts.append(
-        "Accept conversational hedges if the core answer matches any reference. "
-        "Answer only 0 (incorrect or uncommitted) or 1 (correct). "
-        "Output a single digit, nothing else.\nScore:"
-    )
-
-    return "\n\n".join(parts)
+# Labeling functions
+def build_judge_prompt(record: QASample) -> str:
+    """Build a prompt for LLM judging of a HotpotQA record."""
+    assert "question" in record, "Record must contain 'question' key"
+    assert "reference_answer" in record, "Record must contain 'reference_answer' key"
+    assert "raw_answer" in record, "Record must contain 'raw_answer' key with model response"
+    
+    prompt = "Task : You evaluate whether the model response correctly answers the question.\n"
+    prompt += "Accept conversational hedges if the core answer matches any reference alias.\n"
+    prompt += f"Question: {record['question']}\n"
+    prompt += f"Acceptable response: {record['reference_answer']}\n"
+    prompt += f"Model response: {record['raw_answer']}\n"
+    prompt += "Answer only 0 (incorrect or uncommitted) or 1 (correct).\n"
+    prompt += "Output a single digit, nothing else.\n"
+    prompt += "Score:"
+    return prompt
 
 
 def parse_judge_output(text: Any) -> bool | None:
+    """Parse the output of an LLM judge for a HotpotQA record into a label."""
     return parse_judge_score(text)

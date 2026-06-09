@@ -11,11 +11,12 @@
 
 set -euo pipefail
 
-# Usage (via launch_pipeline.sh, not directly):
-#   CONFIGS_FILE=configs/my_list.txt OUTPUT_DIR=outputs_new sbatch --array=0-N%6 scripts/generate_array.slurm
+# Usage (via a launcher script, not directly):
+#   CONFIGS_FILE=configs/my_list.txt OUTPUT_DIR=outputs_new sbatch --array=0-N%6 scripts/generate_array.slurm [extra args]
 #
 # CONFIGS_FILE: path to a text file with one config JSON path per line (blank lines ignored)
 # OUTPUT_DIR:   parent output directory (default: outputs_new); run_id subdirs are created inside
+# extra args:   forwarded verbatim to src.cli.generate (e.g. --num_questions 10)
 
 _dir="${SLURM_SUBMIT_DIR:-$(pwd)}"
 [ -f "$_dir/.env" ] && { set -a; source "$_dir/.env"; set +a; }
@@ -47,7 +48,8 @@ print_uq_header "Generate [${SLURM_ARRAY_TASK_ID}/${#CONFIGS[@]}]: $CONFIG -> $O
 
 run_in_uq_container gpu python -m src.cli.generate \
   --config "$CONFIG" \
-  --output_dir "$OUTPUT_DIR/$RUN_ID"
+  --output_dir "$OUTPUT_DIR/$RUN_ID" \
+  "$@"
 
 echo
 echo "Generation finished at: $(date)"

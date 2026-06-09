@@ -10,12 +10,18 @@ import torch
 
 from src.generate import generate as generate_fn
 from src.generate.traces import save_trace_collection
-from src.config import derive_run_id, load_config, resolve_remasking
+from src.config import (
+    Dataset, GENERATION_DEFAULTS, Model, Remasking,
+    build_generation_config, derive_run_id, load_config, resolve_remasking,
+)
 from src.seed import seed_everything
-from src.datasets.dataloader import load_prompts_jsonl, prepare_dataset_inputs
-
 from src.datasets.dataloader import (
-    expand_greedy_and_sampled, expand_response_samples, interleave_traces,
+    apply_chat_template,
+    expand_greedy_and_sampled,
+    expand_response_samples,
+    interleave_traces,
+    load_prompts_jsonl,
+    prepare_dataset_inputs,
 )
 
 from src.generate.model import (
@@ -29,15 +35,6 @@ _CLI_OVERRIDE_KEYS = (
     "gen_length", "temperature", "generate_greedy",
     "remasking", "mask_id",
     "topk_trace_k", "fewshot_k", "confidence_eos_eot_inf", "seed",
-)
-
-_CONFIG_DEFAULTS = dict(
-    model_id="GSAI-ML/LLaDA-8B-Instruct",
-    seed=42, steps=128, gen_length=128, temperature=0.0,
-    remasking="lc", batch_size=8, topk_trace_k=64,
-    num_response_samples=20, generate_greedy=True,
-    num_questions=1000, fewshot_k=0,
-    logits_eos_inf=False, confidence_eos_eot_inf=False,
 )
 
 def select_device() -> torch.device:
@@ -57,7 +54,12 @@ def select_device() -> torch.device:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate dLLM QA traces.")
-    parser.add_argument("--config", required=True, help="Path to generation config JSON")
+    src = parser.add_argument_group("config source (pick one)")
+    src.add_argument("--config", help="Path to generation config JSON")
+    src.add_argument("--model", choices=[m.value for m in Model],
+                     help="Model name (builds config from registry)")
+    src.add_argument("--dataset", choices=[d.value for d in Dataset],
+                     help="Dataset name (builds config from registry)")
     parser.add_argument("--run_id", help="Run ID for output directory naming")
     parser.add_argument("--num_questions", type=int)
     parser.add_argument("--num_response_samples", type=int)
@@ -74,7 +76,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int)
     parser.add_argument("--prompts", help="Path to prompts.jsonl (from prepare stage)")
     parser.add_argument("--output_dir")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if not args.config and not (args.model and args.dataset):
+        parser.error("Provide either --config or both --model and --dataset")
+    if args.config and (args.model or args.dataset):
+        parser.error("--config and --model/--dataset are mutually exclusive")
+    return args
 
 
 def _apply_config(config: dict, args: argparse.Namespace) -> None:
@@ -85,7 +92,7 @@ def _apply_config(config: dict, args: argparse.Namespace) -> None:
             config[key] = val
     if args.run_id:
         config["run_id"] = args.run_id
-    for key, default in _CONFIG_DEFAULTS.items():
+    for key, default in GENERATION_DEFAULTS.items():
         config.setdefault(key, default)
     model_id = config["model_id"]
     backend = config.get("model_backend", "llada")
@@ -129,7 +136,8 @@ def _load_or_prepare_inputs(config, args, tokenizer, output_dir):
     prompts_path = args.prompts or os.path.join(output_dir, "prompts.jsonl")
     if os.path.isfile(prompts_path):
         print(f"Loading prepared prompts from {prompts_path}...")
-        dataset_key, qa_pairs, prompts = load_prompts_jsonl(prompts_path, tokenizer)
+        dataset_key, qa_pairs, raw_prompts = load_prompts_jsonl(prompts_path)
+        prompts = apply_chat_template(raw_prompts, tokenizer)
         print(f"Loaded {len(qa_pairs)} prompts from '{dataset_key}'.")
     else:
         fewshot_k = int(config["fewshot_k"])
@@ -221,10 +229,23 @@ def _write_answers_jsonl(
             f.write(json.dumps(record, ensure_ascii=True) + "\n")
     print(f"Answers: {path} ({len(answers)} entries)")
 
+def _resolve_config(args: argparse.Namespace) -> dict:
+    """Build a generation config from --config file or --model/--dataset flags."""
+    if args.config:
+        return load_config(args.config)
+    return build_generation_config(
+        Model(args.model),
+        Dataset(args.dataset),
+        args.gen_length or GENERATION_DEFAULTS["gen_length"],
+        args.steps or GENERATION_DEFAULTS["steps"],
+        Remasking(args.remasking or GENERATION_DEFAULTS["remasking"]),
+    )
+
+
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    config = load_config(args.config) # Retrieve config from file
-    _apply_config(config, args) # Apply CLI overrides and set defaults in config
+    config = _resolve_config(args)
+    _apply_config(config, args)
 
     # Set random seed for reproducibility
     seed = int(config["seed"])
@@ -266,10 +287,15 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     # Save complete trace collection to .npz file and metadata to metadata.json
+    from src.registry import get_dataset_module
+    dataset_module = get_dataset_module(dataset_key)
+    parse_answer_fn = getattr(dataset_module, "parse_answer", None)
+
     summary = save_trace_collection(
         output_dir=output_dir, run_config=config, qa_pairs=merged_qa,
         prompts=merged_prompts, rich_traces=rich_traces, tokenizer=tokenizer,
         dataset_key=dataset_key, eos_token_ids=eos_token_ids, pad_token_id=ptid,
+        parse_answer=parse_answer_fn,
     )
 
     # Save the generated answers to answers.jsonl for easy reference

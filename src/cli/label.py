@@ -44,14 +44,11 @@ def main(argv: list[str] | None = None) -> None:
         records = read_jsonl(examples_path)
 
         dataset_key = config.get("dataset", "triviaqa")
-        from src.registry import get_dataset_module
-        dataset_module = get_dataset_module(dataset_key)
+        from src.config import DATASET_CONFIGS, Dataset
+        ds_config = DATASET_CONFIGS[Dataset(dataset_key)]
+        print(f"[label] {run_dir.name}: {len(records)} records, method='{ds_config.label_method}'")
 
-        label_method = getattr(dataset_module, "DEFAULT_LABEL_METHOD", "llm_judge")
-        needs_gpu = getattr(dataset_module, "LABEL_GPU_MODE", "gpu") == "gpu"
-        print(f"[label] {run_dir.name}: {len(records)} records, method='{label_method}'")
-
-        if needs_gpu and evaluator is None:
+        if ds_config.label_gpu_mode == "gpu" and evaluator is None:
             from src.judge.evaluator import EvaluatorLLMLocal
             evaluator = EvaluatorLLMLocal(
                 model_name=args.judge_model,
@@ -62,7 +59,7 @@ def main(argv: list[str] | None = None) -> None:
 
         from src.labeling import label_records
         labeled = label_records(
-            records, dataset_module,
+            records, dataset_key,
             judge_model=args.judge_model,
             judge_tp=args.judge_tp,
             evaluator=evaluator,
@@ -87,9 +84,9 @@ def main(argv: list[str] | None = None) -> None:
             print(f"[label]   These prompts will be excluded from downstream evaluation.")
 
         if args.print_examples:
-            correct = sum(1 for r in records if r.get("final", {}).get("is_correct") is True)
-            incorrect = sum(1 for r in records if r.get("final", {}).get("is_correct") is False)
-            ambiguous = sum(1 for r in records if r.get("final", {}).get("is_correct") is None
+            correct = sum(1 for r in records if r.get("label") is True)
+            incorrect = sum(1 for r in records if r.get("label") is False)
+            ambiguous = sum(1 for r in records if r.get("label") is None
                            and "correctness_method" in r.get("final", {}))
             total = correct + incorrect
             print(f"[label] Results: {correct} correct, {incorrect} incorrect"
