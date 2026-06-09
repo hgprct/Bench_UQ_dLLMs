@@ -62,7 +62,7 @@ def _load_latency_csv(path: Path) -> dict[str, dict[str, float]]:
 
 
 def _load_latency_metadata(meta_path: Path) -> dict[str, Any]:
-    from src.io.json_utils import read_json
+    from src.utils.io import read_json
     return read_json(meta_path)
 
 
@@ -72,8 +72,8 @@ def _discover_latency(latency_dir: Path) -> dict[tuple[str, str, str], tuple[dic
     Searches recursively so latency data can live in a flat directory
     (outputs/latency/<config>/) or inside run dirs (<run>/latency/).
     """
-    from src.io.json_utils import read_json
-    from src.io.results_xlsx import _resolve_model_name
+    from src.utils.io import read_json
+    from src.utils.results_xlsx import _resolve_model_name
 
     found: dict[tuple[str, str, str], tuple[dict, Path]] = {}
     if not latency_dir.is_dir():
@@ -201,7 +201,7 @@ def _write_pareto(
 # ---------------------------------------------------------------------------
 
 def main(argv: list[str] | None = None) -> None:
-    from src.io.results_xlsx import (
+    from src.utils.results_xlsx import (
         _resolve_model_name,
         _selection_feature_name,
         find_kfold_summaries,

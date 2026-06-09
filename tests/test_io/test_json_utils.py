@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from src.io.json_utils import read_json, read_jsonl, to_jsonable, write_json, write_jsonl
+from src.utils.io import read_json, read_jsonl, to_jsonable, write_json, write_jsonl
 
 
 class TestToJsonable:

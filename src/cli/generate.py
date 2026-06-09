@@ -12,9 +12,9 @@ from src.generate import generate as generate_fn
 from src.generate.traces import save_trace_collection
 from src.config import derive_run_id, load_config, resolve_remasking
 from src.seed import seed_everything
-from src.generate.dataset_inputs import load_prompts_jsonl, prepare_dataset_inputs
+from src.datasets.dataloader import load_prompts_jsonl, prepare_dataset_inputs
 
-from src.generate.dataset_inputs import (
+from src.datasets.dataloader import (
     expand_greedy_and_sampled, expand_response_samples, interleave_traces,
 )
 

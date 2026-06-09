@@ -140,7 +140,7 @@ def build_trace_example_records(qa_pairs, prompts, rich_traces, tokenizer, datas
 
 
 def _example_id(qa_item, sample_id):
-    from src.generate.dataset_inputs import _example_id as _shared_example_id
+    from src.datasets.dataloader import _example_id as _shared_example_id
     return _shared_example_id(qa_item, sample_id)
 
 

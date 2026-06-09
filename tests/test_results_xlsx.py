@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from src.io.results_xlsx import (
+from src.utils.results_xlsx import (
     CompetitorKey,
     CompetitorSummary,
     RunResult,
@@ -84,7 +84,7 @@ class TestSummaryColumns:
 
 class TestAggregateByModel:
     def test_groups_by_model_and_config(self):
-        from src.io.results_xlsx import aggregate_by_model
+        from src.utils.results_xlsx import aggregate_by_model
 
         r1 = RunResult(
             run_dir=Path("/a"),
@@ -131,7 +131,7 @@ class TestAggregateByModel:
 
 class TestWriteModelWorkbook:
     def test_creates_xlsx_with_model_tabs(self, tmp_path):
-        from src.io.results_xlsx import write_model_workbook
+        from src.utils.results_xlsx import write_model_workbook
 
         results = [
             RunResult(

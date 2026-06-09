@@ -25,9 +25,9 @@ def main(argv: list[str] | None = None) -> None:
     seed_everything(args.seed)
 
     from src.semantic.entailment import load_entailment_model
-    from src.datasets.labeling import unlabeled_prompt_ids
+    from src.labeling import unlabeled_prompt_ids
     from src.features.builder import build_feature_rows
-    from src.io.json_utils import read_jsonl, write_jsonl
+    from src.utils.io import read_jsonl, write_jsonl
 
     run_dir = Path(args.input_logs)
     records = read_jsonl(run_dir / "examples.jsonl")

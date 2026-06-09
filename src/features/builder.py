@@ -25,7 +25,7 @@ from src.features.token import (
     special_ids_from_config,
     visible_positions,
 )
-from src.io.json_utils import read_json, read_jsonl
+from src.utils.io import read_json, read_jsonl
 
 
 def build_feature_rows(
@@ -155,7 +155,7 @@ def _partition_greedy_sampled(records: list[dict]) -> tuple[dict | None, list[di
     greedy = None
     sampled = []
     for record in records:
-        mode = record.get("generation_mode") or record.get("metadata", {}).get("generation_mode")
+        mode = record.get("generation_mode")
         if mode == "greedy":
             greedy = record
         else:

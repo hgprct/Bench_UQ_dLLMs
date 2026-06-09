@@ -1,4 +1,4 @@
-"""CLI: label all runs in a folder, loading the LLM judge once for all llm_judge runs."""
+"""CLI: label all runs in a folder, loading the LLM judge once for all GPU-mode runs."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from src.seed import seed_everything
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Label every run in a folder. Loads the LLM judge once for all non-gsm8k runs."
+        description="Label every run in a folder. Loads the LLM judge once for all GPU-mode runs."
     )
     parser.add_argument("--folder", default="outputs/", help="Folder containing run directories")
     parser.add_argument("--judge-model", default="meta-llama/Llama-3.3-70B-Instruct")
@@ -49,7 +49,6 @@ def _print_accuracy(records: list[dict], name: str) -> None:
 
 def _label_run(
     run_dir: Path,
-    method: str,
     evaluator,
     judge_model: str,
     judge_tp: int | None,
@@ -57,17 +56,18 @@ def _label_run(
     dataset_key: str,
     force: bool = False,
 ) -> None:
-    from src.io.json_utils import read_jsonl
+    from src.utils.io import read_jsonl
     from src.registry import get_dataset_module
-    from src.datasets.labeling import label_records
+    from src.labeling import label_records
 
     dataset_module = get_dataset_module(dataset_key)
     records = read_jsonl(run_dir / "examples.jsonl")
 
+    method = getattr(dataset_module, "DEFAULT_LABEL_METHOD", "llm_judge")
     print(f"[label_all] {run_dir.name}: {len(records)} records, method='{method}'")
 
     labeled = label_records(
-        records, dataset_module, method,
+        records, dataset_module,
         judge_model=judge_model,
         judge_tp=judge_tp,
         evaluator=evaluator,
@@ -97,30 +97,29 @@ def main(argv: list[str] | None = None) -> None:
 
     print(f"[label_all] Found {len(runs)} run(s) to label")
 
-    from src.config import Dataset, DATASET_DEFAULTS
+    from src.registry import get_dataset_module
 
-    llm_judge_runs: list[tuple[Path, str]] = []
-    exact_match_runs: list[tuple[Path, str]] = []
+    gpu_runs: list[tuple[Path, str]] = []
+    cpu_runs: list[tuple[Path, str]] = []
 
     for run_dir in runs:
         with open(run_dir / "config.json") as f:
             config = json.load(f)
         dataset_key = config.get("dataset", "triviaqa")
-        method = DATASET_DEFAULTS[Dataset(dataset_key)].default_label_method
-        if method == "llm_judge":
-            llm_judge_runs.append((run_dir, dataset_key))
-        elif method == "exact_match":
-            exact_match_runs.append((run_dir, dataset_key))
+        dataset_module = get_dataset_module(dataset_key)
+        gpu_mode = getattr(dataset_module, "LABEL_GPU_MODE", "gpu")
+        if gpu_mode == "gpu":
+            gpu_runs.append((run_dir, dataset_key))
         else:
-            print(f"[label_all] WARNING: {run_dir.name} has unsupported default method '{method}', skipping")
+            cpu_runs.append((run_dir, dataset_key))
 
-    print(f"[label_all] exact_match runs: {len(exact_match_runs)}, llm_judge runs: {len(llm_judge_runs)}")
+    print(f"[label_all] cpu runs: {len(cpu_runs)}, gpu (judge) runs: {len(gpu_runs)}")
 
-    for run_dir, dataset_key in exact_match_runs:
-        _label_run(run_dir, "exact_match", None, args.judge_model, args.judge_tp, args.print_examples, dataset_key, force=args.force)
+    for run_dir, dataset_key in cpu_runs:
+        _label_run(run_dir, None, args.judge_model, args.judge_tp, args.print_examples, dataset_key, force=args.force)
 
     evaluator = None
-    for run_dir, dataset_key in llm_judge_runs:
+    for run_dir, dataset_key in gpu_runs:
         if evaluator is None:
             from src.judge.evaluator import EvaluatorLLMLocal
             print(f"[label_all] Loading judge: {args.judge_model}")
@@ -130,7 +129,7 @@ def main(argv: list[str] | None = None) -> None:
                 max_num_seqs=args.judge_max_num_seqs,
                 gpu_memory_utilization=args.judge_gpu_mem,
             )
-        _label_run(run_dir, "llm_judge", evaluator, args.judge_model, args.judge_tp, args.print_examples, dataset_key, force=args.force)
+        _label_run(run_dir, evaluator, args.judge_model, args.judge_tp, args.print_examples, dataset_key, force=args.force)
 
     print("[label_all] All runs labeled.")
 

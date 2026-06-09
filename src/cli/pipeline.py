@@ -45,7 +45,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--batch_size", type=int)
     parser.add_argument("--seed", type=int, default=42)
 
-    parser.add_argument("--label_method", default=None)
     parser.add_argument("--judge_model", default="meta-llama/Llama-3.3-70B-Instruct")
     parser.add_argument("--judge_tp", type=int, default=None, help="vLLM tensor parallel size (default: auto)")
     parser.add_argument("--nli_model", default="microsoft/deberta-v2-xlarge-mnli")
@@ -134,9 +133,7 @@ def main(argv: list[str] | None = None) -> None:
     if "label" in args.stages:
         print(f"\n{'='*60}\nStage: label\n{'='*60}")
         from src.cli.label import main as label_main
-        label_args = ["--run-dir", str(run_dir)]
-        method = args.label_method or ds_defaults.default_label_method
-        label_args += ["--method", method, "--print-examples"]
+        label_args = ["--run-dir", str(run_dir), "--print-examples"]
         label_args += ["--judge-model", args.judge_model]
         if args.judge_tp is not None:
             label_args += ["--judge-tp", str(args.judge_tp)]

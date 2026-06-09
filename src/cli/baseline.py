@@ -40,8 +40,8 @@ def main(argv: list[str] | None = None) -> None:
 
     from src.features.builder import build_feature_rows
     from src.features.sampling import CachedEntailmentModel
-    from src.datasets.labeling import unlabeled_prompt_ids
-    from src.io.json_utils import read_jsonl, write_jsonl
+    from src.labeling import unlabeled_prompt_ids
+    from src.utils.io import read_jsonl, write_jsonl
     from src.semantic.entailment import load_entailment_model
 
     run_dir = Path(args.run_dir)

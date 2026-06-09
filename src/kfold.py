@@ -7,7 +7,7 @@ import math
 from pathlib import Path
 from typing import Any
 
-from src.io.json_utils import to_jsonable, write_json
+from src.utils.io import to_jsonable, write_json
 
 
 def aggregate_kfold_results(

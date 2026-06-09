@@ -12,7 +12,6 @@ from src.seed import seed_everything
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Label greedy final answers as correct/incorrect.")
     parser.add_argument("--run-dir", required=True, nargs="+", help="Run directory(ies) with examples.jsonl + config.json")
-    parser.add_argument("--method", default=None, help="Labeling method: exact_match or llm_judge (default: from config)")
     parser.add_argument("--judge-model", default="meta-llama/Llama-3.3-70B-Instruct")
     parser.add_argument("--judge-tp", type=int, default=None, help="vLLM tensor parallel size (default: auto)")
     parser.add_argument("--judge-max-num-seqs", type=int, default=None, help="vLLM max concurrent sequences")
@@ -41,19 +40,18 @@ def main(argv: list[str] | None = None) -> None:
         with open(config_path) as f:
             config = json.load(f)
 
-        from src.io.json_utils import read_jsonl
+        from src.utils.io import read_jsonl
         records = read_jsonl(examples_path)
 
         dataset_key = config.get("dataset", "triviaqa")
         from src.registry import get_dataset_module
         dataset_module = get_dataset_module(dataset_key)
 
-        from src.config import Dataset, DATASET_DEFAULTS
-        ds_default_method = DATASET_DEFAULTS[Dataset(dataset_key)].default_label_method
-        method = args.method or ds_default_method
-        print(f"[label] {run_dir.name}: {len(records)} records, method='{method}'")
+        label_method = getattr(dataset_module, "DEFAULT_LABEL_METHOD", "llm_judge")
+        needs_gpu = getattr(dataset_module, "LABEL_GPU_MODE", "gpu") == "gpu"
+        print(f"[label] {run_dir.name}: {len(records)} records, method='{label_method}'")
 
-        if method == "llm_judge" and evaluator is None:
+        if needs_gpu and evaluator is None:
             from src.judge.evaluator import EvaluatorLLMLocal
             evaluator = EvaluatorLLMLocal(
                 model_name=args.judge_model,
@@ -62,9 +60,9 @@ def main(argv: list[str] | None = None) -> None:
                 gpu_memory_utilization=args.judge_gpu_mem,
             )
 
-        from src.datasets.labeling import label_records
+        from src.labeling import label_records
         labeled = label_records(
-            records, dataset_module, method,
+            records, dataset_module,
             judge_model=args.judge_model,
             judge_tp=args.judge_tp,
             evaluator=evaluator,
@@ -77,7 +75,7 @@ def main(argv: list[str] | None = None) -> None:
 
         print(f"[label] Labeled {labeled} records. Updated {examples_path}")
 
-        from src.datasets.labeling import unlabeled_prompt_ids
+        from src.labeling import unlabeled_prompt_ids
         excluded = unlabeled_prompt_ids(records)
         if excluded:
             sorted_ids = sorted(excluded)

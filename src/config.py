@@ -26,9 +26,10 @@ class Dataset(str, Enum):
     triviaqa = "triviaqa"
     gsm8k = "gsm8k"
     wmt14_fr_en = "wmt14_fr_en"
-    wmt14_de_en = "wmt14_de_en"
     xsum = "xsum"
     samsum = "samsum"
+    hotpotqa = "hotpotqa"
+    musique = "musique"
 
 
 class Remasking(str, Enum):
@@ -69,62 +70,70 @@ class DatasetDefaults:
     fewshot_k: int = 0
 
 
-DATASET_DEFAULTS: dict[Dataset, DatasetDefaults] = {
-    Dataset.triviaqa: DatasetDefaults(
-        hf_name="mandarjoshi/trivia_qa",
-        config_name="rc",
-        split="validation",
-        batch_size=32,
-        default_label_method="llm_judge",
-        label_gpu_mode="gpu",
-        fewshot_k=0,
-    ),
-    Dataset.gsm8k: DatasetDefaults(
-        hf_name="openai/gsm8k",
-        config_name="main",
-        split="test",
-        batch_size=16,
-        default_label_method="exact_match",
-        label_gpu_mode="cpu",
-        fewshot_k=4,
-    ),
-    Dataset.wmt14_fr_en: DatasetDefaults(
-        hf_name="wmt/wmt14",
-        config_name="fr-en",
-        split="test",
-        batch_size=16,
-        default_label_method="llm_judge",
-        label_gpu_mode="gpu",
-        fewshot_k=0,
-    ),
-    Dataset.wmt14_de_en: DatasetDefaults(
-        hf_name="wmt/wmt14",
-        config_name="de-en",
-        split="test",
-        batch_size=16,
-        default_label_method="llm_judge",
-        label_gpu_mode="gpu",
-        fewshot_k=0,
-    ),
-    Dataset.xsum: DatasetDefaults(
-        hf_name="EdinburghNLP/xsum",
-        config_name=None,
-        split="test",
-        batch_size=16,
-        default_label_method="llm_judge",
-        label_gpu_mode="gpu",
-        fewshot_k=0,
-    ),
-    Dataset.samsum: DatasetDefaults(
-        hf_name="knkarthick/samsum",
-        config_name=None,
-        split="test",
-        batch_size=16,
-        default_label_method="llm_judge",
-        label_gpu_mode="gpu",
-        fewshot_k=0,
-    ),
+def _defaults_from_adapter(dataset: Dataset, batch_size: int = 16) -> DatasetDefaults:
+    """Derive DatasetDefaults from the adapter module's constants."""
+    from src.registry import get_dataset_module
+    mod = get_dataset_module(dataset.value)
+    return DatasetDefaults(
+        hf_name=getattr(mod, "HF_NAME"),
+        config_name=getattr(mod, "DEFAULT_CONFIG_NAME", None),
+        split=getattr(mod, "DEFAULT_SPLIT", "test"),
+        batch_size=batch_size,
+        default_label_method=getattr(mod, "DEFAULT_LABEL_METHOD", "llm_judge"),
+        label_gpu_mode=getattr(mod, "LABEL_GPU_MODE", "gpu"),
+        fewshot_k=getattr(mod, "FEWSHOT_K", 0),
+    )
+
+
+_DATASET_BATCH_SIZES: dict[Dataset, int] = {
+    Dataset.triviaqa: 32,
+    Dataset.gsm8k: 16,
+    Dataset.wmt14_fr_en: 16,
+    Dataset.xsum: 16,
+    Dataset.samsum: 16,
+    Dataset.hotpotqa: 16,
+    Dataset.musique: 16,
 }
+
+_DATASET_DEFAULTS_CACHE: dict[Dataset, DatasetDefaults] | None = None
+
+
+def _get_dataset_defaults() -> dict[Dataset, DatasetDefaults]:
+    global _DATASET_DEFAULTS_CACHE
+    if _DATASET_DEFAULTS_CACHE is None:
+        _DATASET_DEFAULTS_CACHE = {
+            ds: _defaults_from_adapter(ds, _DATASET_BATCH_SIZES.get(ds, 16))
+            for ds in Dataset
+        }
+    return _DATASET_DEFAULTS_CACHE
+
+
+class _DatasetDefaultsProxy:
+    """Dict-like proxy that lazily builds DATASET_DEFAULTS on first access."""
+
+    def __getitem__(self, key: Dataset) -> DatasetDefaults:
+        return _get_dataset_defaults()[key]
+
+    def __contains__(self, key: object) -> bool:
+        return key in _get_dataset_defaults()
+
+    def __iter__(self):
+        return iter(_get_dataset_defaults())
+
+    def items(self):
+        return _get_dataset_defaults().items()
+
+    def values(self):
+        return _get_dataset_defaults().values()
+
+    def keys(self):
+        return _get_dataset_defaults().keys()
+
+    def get(self, key, default=None):
+        return _get_dataset_defaults().get(key, default)
+
+
+DATASET_DEFAULTS: Any = _DatasetDefaultsProxy()
 
 def run_id(
     model: Model,

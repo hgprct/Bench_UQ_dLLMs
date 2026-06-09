@@ -1,4 +1,4 @@
-"""Tests for src.registry -- strict 4-entry dataset registry."""
+"""Tests for src.registry -- strict 7-entry dataset registry."""
 
 import sys
 from pathlib import Path
@@ -13,7 +13,6 @@ class TestGetDatasetModule:
         mod = get_dataset_module("triviaqa")
         assert hasattr(mod, "extract_question_and_answer")
         assert hasattr(mod, "format_prompt")
-        assert hasattr(mod, "load_dataset")
 
     def test_gsm8k(self):
         mod = get_dataset_module("gsm8k")
@@ -21,10 +20,6 @@ class TestGetDatasetModule:
 
     def test_wmt14(self):
         mod = get_dataset_module("wmt14_fr_en")
-        assert hasattr(mod, "extract_question_and_answer")
-
-    def test_wmt14_de_en(self):
-        mod = get_dataset_module("wmt14_de_en")
         assert hasattr(mod, "extract_question_and_answer")
 
     def test_unknown_raises(self):
@@ -39,13 +34,11 @@ class TestGetDatasetModule:
         mod = get_dataset_module("xsum")
         assert hasattr(mod, "extract_question_and_answer")
         assert hasattr(mod, "format_prompt")
-        assert hasattr(mod, "load_dataset")
 
     def test_samsum(self):
         mod = get_dataset_module("samsum")
         assert hasattr(mod, "extract_question_and_answer")
         assert hasattr(mod, "format_prompt")
-        assert hasattr(mod, "load_dataset")
 
     def test_old_alias_not_supported(self):
         """Old aliases like 'mandarjoshi/trivia_qa' must not work."""
@@ -55,7 +48,21 @@ class TestGetDatasetModule:
         except ValueError:
             pass
 
-    def test_exactly_six_entries(self):
-        valid = ["triviaqa", "gsm8k", "wmt14_fr_en", "wmt14_de_en", "xsum", "samsum"]
+    def test_hotpotqa(self):
+        mod = get_dataset_module("hotpotqa")
+        assert hasattr(mod, "extract_question_and_answer")
+        assert hasattr(mod, "format_prompt")
+        assert hasattr(mod, "build_judge_prompt")
+        assert hasattr(mod, "parse_judge_output")
+
+    def test_musique(self):
+        mod = get_dataset_module("musique")
+        assert hasattr(mod, "extract_question_and_answer")
+        assert hasattr(mod, "format_prompt")
+        assert hasattr(mod, "build_judge_prompt")
+        assert hasattr(mod, "parse_judge_output")
+
+    def test_all_entries(self):
+        valid = ["triviaqa", "gsm8k", "wmt14_fr_en", "xsum", "samsum", "hotpotqa", "musique"]
         for name in valid:
             get_dataset_module(name)

@@ -17,15 +17,6 @@
     "instruction": "Ignore stylistic differences. Answer only 0 (critical semantic error or hallucination) or 1 (meaning preserved).\nOutput a single digit, nothing else.",
     "score_label": "Score:"
   },
-  "wmt14_de_en": {
-    "preamble": "Task : You evaluate the quality of a machine translation from German to English.",
-    "fields_separator": "\n\n",
-    "source_label": "German",
-    "reference_label": null,
-    "candidate_label": "English",
-    "instruction": "Ignore stylistic differences. Answer only 0 (critical semantic error or hallucination) or 1 (meaning preserved).\nOutput a single digit, nothing else.",
-    "score_label": "Score:"
-  },
   "xsum": {
     "preamble": "Task : You evaluate the consistency of a summary with the source document.",
     "fields_separator": "\n\n",

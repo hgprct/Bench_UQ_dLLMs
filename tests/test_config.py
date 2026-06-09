@@ -32,9 +32,10 @@ class TestEnums:
         assert Dataset.triviaqa.value == "triviaqa"
         assert Dataset.gsm8k.value == "gsm8k"
         assert Dataset.wmt14_fr_en.value == "wmt14_fr_en"
-        assert Dataset.wmt14_de_en.value == "wmt14_de_en"
         assert Dataset.xsum.value == "xsum"
         assert Dataset.samsum.value == "samsum"
+        assert Dataset.hotpotqa.value == "hotpotqa"
+        assert Dataset.musique.value == "musique"
 
     def test_remasking_values(self):
         assert Remasking.lc.value == "lc"

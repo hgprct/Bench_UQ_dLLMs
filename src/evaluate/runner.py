@@ -18,7 +18,7 @@ from src.features.directions import (
     all_feature_names,
     build_feature_directions,
 )
-from src.io.json_utils import read_jsonl, write_json
+from src.utils.io import read_jsonl, write_json
 
 _INDEXED_RANDOM_RE = re.compile(r"^random-(\d+)-(.+)$")
 

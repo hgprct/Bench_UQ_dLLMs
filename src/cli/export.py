@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from src.io.results_xlsx import (
+from src.utils.results_xlsx import (
     aggregate_results,
     aggregate_summary_columns,
     find_kfold_summaries,
