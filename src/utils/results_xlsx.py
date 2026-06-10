@@ -28,7 +28,6 @@ DATASET_TITLES = {
     "triviaqa": "TriviaQA",
     "gsm8k": "GSM8K",
     "wmt14_fr_en": "WMT14 fr-en",
-    "wmt14_de_en": "WMT14 de-en",
     "xsum": "XSum",
     "samsum": "SamSum",
     "hotpotqa": "HotpotQA",
@@ -37,7 +36,7 @@ DATASET_TITLES = {
 
 HEADER_FIELDS = [
     ("model_id", "Model"),
-    ("gen_length", "Generation length"),
+    ("max_gen_length", "Max gen length"),
     ("steps", "Steps"),
     ("remasking", "Strategy"),
     ("label_method", "Label method"),
@@ -47,7 +46,7 @@ HEADER_FIELDS = [
 @dataclass(frozen=True, order=True)
 class CompetitorKey:
     model_id: str
-    gen_length: str
+    max_gen_length: str
     steps: str
     remasking: str
     label_method: str
@@ -200,7 +199,7 @@ def load_run_result(metrics_path: str | Path) -> RunResult:
 
     dataset = str(config.get("dataset", "unknown"))
     model_id = str(config.get("model_id") or config.get("model_name_or_path") or "unknown")
-    gen_length = str(config.get("gen_length", "unknown"))
+    gen_length = str(config.get("max_gen_length", config.get("gen_length", "unknown")))
     steps = str(config.get("steps", "unknown"))
     remasking = str(config.get("remasking", "unknown"))
     label_method = str(config.get("label_method", config.get("correctness_method", "unknown")))
@@ -263,7 +262,7 @@ def load_run_result(metrics_path: str | Path) -> RunResult:
         metrics_path=metrics_path,
         dataset=dataset,
         competitor=CompetitorKey(
-            model_id=model_id, gen_length=gen_length, steps=steps,
+            model_id=model_id, max_gen_length=gen_length, steps=steps,
             remasking=remasking, label_method=label_method,
         ),
         qa_accuracy=qa_accuracy,
@@ -371,13 +370,13 @@ def load_kfold_results(summary_path: str | Path) -> list[RunResult]:
     config = _load_config_from_ancestors(run_dir)
     dataset = str(config.get("dataset", "unknown"))
     model_id = str(config.get("model_id") or config.get("model_name_or_path") or "unknown")
-    gen_length = str(config.get("gen_length", "unknown"))
+    gen_length = str(config.get("max_gen_length", config.get("gen_length", "unknown")))
     steps = str(config.get("steps", "unknown"))
     remasking = str(config.get("remasking", "unknown"))
     label_method = str(config.get("label_method", config.get("correctness_method", "unknown")))
 
     competitor = CompetitorKey(
-        model_id=model_id, gen_length=gen_length, steps=steps,
+        model_id=model_id, max_gen_length=gen_length, steps=steps,
         remasking=remasking, label_method=label_method,
     )
 
@@ -562,7 +561,7 @@ def write_workbook(
 
             for col_off, (s, m) in enumerate(metric_columns, start=2):
                 vals = {
-                    "model_id": s.key.model_id, "gen_length": s.key.gen_length,
+                    "model_id": s.key.model_id, "max_gen_length": s.key.max_gen_length,
                     "steps": s.key.steps, "remasking": s.key.remasking,
                     "label_method": s.key.label_method,
                 }

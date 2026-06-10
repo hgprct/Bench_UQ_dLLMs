@@ -11,7 +11,7 @@ from src.seed import seed_everything
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Label greedy final answers as correct/incorrect.")
-    parser.add_argument("--run-dir", required=True, nargs="+", help="Run directory(ies) with examples.jsonl + config.json")
+    parser.add_argument("--run-dir", required=True, nargs="+", help="Run directory(ies) with answers.jsonl + config.json")
     parser.add_argument("--judge-model", default="meta-llama/Llama-3.3-70B-Instruct")
     parser.add_argument("--judge-tp", type=int, default=None, help="vLLM tensor parallel size (default: auto)")
     parser.add_argument("--judge-max-num-seqs", type=int, default=None, help="vLLM max concurrent sequences")
@@ -31,17 +31,17 @@ def main(argv: list[str] | None = None) -> None:
 
     for run_dir in run_dirs:
         config_path = run_dir / "config.json"
-        examples_path = run_dir / "examples.jsonl"
+        answers_path = run_dir / "answers.jsonl"
 
-        if not examples_path.exists() or not config_path.exists():
-            print(f"[label] Skipping {run_dir.name}: missing config.json or examples.jsonl")
+        if not answers_path.exists() or not config_path.exists():
+            print(f"[label] Skipping {run_dir.name}: missing config.json or answers.jsonl")
             continue
 
         with open(config_path) as f:
             config = json.load(f)
 
         from src.utils.io import read_jsonl
-        records = read_jsonl(examples_path)
+        records = read_jsonl(answers_path)
 
         dataset_key = config.get("dataset", "triviaqa")
         from src.config import DATASET_CONFIGS, Dataset
@@ -66,11 +66,11 @@ def main(argv: list[str] | None = None) -> None:
             force=args.force,
         )
 
-        with open(examples_path, "w") as f:
+        with open(answers_path, "w") as f:
             for record in records:
                 f.write(json.dumps(record, ensure_ascii=True, allow_nan=False) + "\n")
 
-        print(f"[label] Labeled {labeled} records. Updated {examples_path}")
+        print(f"[label] Labeled {labeled} records. Updated {answers_path}")
 
         from src.labeling import unlabeled_prompt_ids
         excluded = unlabeled_prompt_ids(records)

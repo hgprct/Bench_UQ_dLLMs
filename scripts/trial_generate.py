@@ -2,13 +2,12 @@
 """Trial script: generate one greedy answer for N prompts of each dataset.
 
 Loads the model once, then iterates over all registered datasets (or a
-user-supplied subset). Only final answers are collected; no trajectory
-data is saved.
+user-supplied subset). Only final answers are collected.
 
 Usage:
     python scripts/trial_generate.py [--model_id ID] [--num_prompts N]
-        [--gen_length L] [--steps S] [--datasets d1 d2 ...]
-        [--output path/to/results.jsonl]
+        [--max_gen_length L] [--steps S] [--block_size B]
+        [--datasets d1 d2 ...] [--output path/to/results.jsonl]
 """
 
 from __future__ import annotations
@@ -16,14 +15,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sys
 
 import torch
 
-
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
 
 def _select_device() -> torch.device:
     if not torch.cuda.is_available():
@@ -43,10 +37,6 @@ def _print_section(title: str) -> None:
     print(f"{'='*60}")
 
 
-# ---------------------------------------------------------------------------
-# main
-# ---------------------------------------------------------------------------
-
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     from src.config import Dataset, MODEL_HF_IDS, Model
 
@@ -56,26 +46,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model_id", default=default_model,
                         help=f"HuggingFace model ID (default: {default_model})")
-    parser.add_argument("--num_prompts", type=int, default=10,
-                        help="Number of prompts per dataset (default: 10)")
-    parser.add_argument("--gen_length", type=int, default=128,
-                        help="Generation length in tokens (default: 128)")
-    parser.add_argument("--steps", type=int, default=128,
-                        help="Denoising steps (default: 128)")
-    parser.add_argument("--batch_size", type=int, default=10,
-                        help="Batch size for generation (default: 10)")
+    parser.add_argument("--num_prompts", type=int, default=10)
+    parser.add_argument("--max_gen_length", type=int, default=128)
+    parser.add_argument("--steps", type=int, default=128)
+    parser.add_argument("--block_size", type=int, default=None)
+    parser.add_argument("--batch_size", type=int, default=10)
     parser.add_argument("--datasets", nargs="*", default=None,
-                        choices=all_datasets, metavar="DATASET",
-                        help=f"Datasets to run (default: all). Choices: {all_datasets}")
-    parser.add_argument("--output", default=None,
-                        help="Optional path to write results as JSONL")
+                        choices=all_datasets, metavar="DATASET")
+    parser.add_argument("--output", default=None)
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
 
-    from src.config import Dataset, MODEL_BACKENDS, MODEL_HF_IDS, Model, resolve_remasking
+    from src.config import Dataset, resolve_remasking
     from src.datasets.dataloader import prepare_dataset_inputs
     from src.generate import generate as generate_fn
     from src.generate.model import (
@@ -87,20 +72,8 @@ def main(argv: list[str] | None = None) -> None:
     seed_everything(42)
     device = _select_device()
     print(f"Device: {device}")
+    print(f"Model:  {args.model_id}")
 
-    # Resolve backend from model_id
-    hf_id_to_model = {v: k for k, v in MODEL_HF_IDS.items()}
-    model_enum = hf_id_to_model.get(args.model_id)
-    backend = MODEL_BACKENDS.get(model_enum, "llada") if model_enum else "llada"
-    if "dream" in args.model_id.lower():
-        backend = "dream"
-    elif "nemotron" in args.model_id.lower():
-        backend = "nemotron"
-
-    print(f"Model:   {args.model_id}")
-    print(f"Backend: {backend}")
-
-    # Load model and tokenizer once
     model = load_model(args.model_id, device)
     tokenizer = load_tokenizer(args.model_id)
     if tokenizer.padding_side != "left":
@@ -147,16 +120,15 @@ def main(argv: list[str] | None = None) -> None:
                 model=model,
                 prompts=prompts,
                 device=device,
-                backend=backend,
                 batch_size=args.batch_size,
                 tokenizer=tokenizer,
                 steps=args.steps,
-                gen_length=args.gen_length,
+                max_gen_length=args.max_gen_length,
+                block_size=args.block_size,
                 temperature=0.0,
                 remasking=resolve_remasking("lc"),
                 mask_id=mask_id,
                 eos_token_ids=eos_token_ids,
-                save_trajectory=False,
             )
         except Exception as exc:
             print(f"  ERROR during generation: {exc}")
@@ -177,13 +149,11 @@ def main(argv: list[str] | None = None) -> None:
             print(f"       A: {answer[:120]}")
             print(f"       ref: {ref}")
 
-    # Summary
     _print_section("Summary")
     print(f"Total answers: {len(all_results)}")
     if failed:
         print(f"Failed datasets: {', '.join(failed)}")
 
-    # Save if requested
     if args.output:
         os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
         with open(args.output, "w") as f:

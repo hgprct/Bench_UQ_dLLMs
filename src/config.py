@@ -21,8 +21,6 @@ class Model(str, Enum):
     """Supported diffusion language models."""
     LLaDA    = "LLaDA"
     LLaDA15  = "LLaDA1.5"
-    Dream    = "Dream"
-    Nemotron = "Nemotron"
 
 
 class Dataset(str, Enum):
@@ -30,7 +28,6 @@ class Dataset(str, Enum):
     triviaqa    = "triviaqa"
     gsm8k       = "gsm8k"
     wmt14_fr_en = "wmt14_fr_en"
-    wmt14_de_en = "wmt14_de_en"
     xsum        = "xsum"
     samsum      = "samsum"
     hotpotqa    = "hotpotqa"
@@ -50,15 +47,6 @@ class Remasking(str, Enum):
 MODEL_HF_IDS: dict[Model, str] = {
     Model.LLaDA:    "GSAI-ML/LLaDA-8B-Instruct",
     Model.LLaDA15:  "GSAI-ML/LLaDA-1.5",
-    Model.Dream:    "Dream-org/Dream-v0-Instruct-7B",
-    Model.Nemotron: "nvidia/Nemotron-Labs-Diffusion-8B",
-}
-
-MODEL_BACKENDS: dict[Model, str] = {
-    Model.LLaDA:    "llada",
-    Model.LLaDA15:  "llada",
-    Model.Dream:    "dream",
-    Model.Nemotron: "nemotron",
 }
 
 REMASKING_FULL_NAMES: dict[Remasking, str] = {
@@ -74,96 +62,110 @@ REMASKING_FULL_NAMES: dict[Remasking, str] = {
 @dataclass(frozen=True)
 class DatasetConfig:
     """Complete configuration for one dataset."""
-    hf_name:        str        # HuggingFace dataset identifier (empty string if loading locally)
-    local_path:     str | None # Local file path; takes precedence over hf_name when set
-    config_name:    str | None # HuggingFace dataset config variant (e.g. "rc", "fr-en")
-    split:          str        # Default split to use (train / validation / test)
-    label_method:   str        # "exact_match" or "llm_judge"
-    label_gpu_mode: str        # "cpu" or "gpu" — whether labeling requires a GPU-hosted judge
-    fewshot_k:      int        # Default number of few-shot examples to prepend
-    batch_size:     int        # Default generation batch size
+    hf_name:         str            # HuggingFace dataset identifier (empty string if loading locally)
+    local_path:      str | None     # Local file path; takes precedence over hf_name when set
+    config_name:     str | None     # HuggingFace dataset config variant (e.g. "rc", "fr-en")
+    split:           str            # Default split to use (train / validation / test)
+    label_method:    str            # "exact_match" or "llm_judge"
+    label_gpu_mode:  str            # "cpu" or "gpu" — whether labeling requires a GPU-hosted judge
+    fewshot_k:       int            # Default number of few-shot examples to prepend
+    batch_size:      int            # Default generation batch size
+    max_gen_length:  int            # Maximum tokens to generate
+    steps:           int            # Default denoising steps
+    block_size:      int | None     # Block-diffusion block size (None = no blocking, uses max_gen_length)
 
 
 DATASET_CONFIGS: dict[Dataset, DatasetConfig] = {
     Dataset.gsm8k: DatasetConfig(
-        hf_name        = "openai/gsm8k",
-        local_path     = None,
-        config_name    = "main",
-        split          = "test",
-        label_method   = "exact_match",
-        label_gpu_mode = "cpu",
-        fewshot_k      = 4,
-        batch_size     = 16,
+        hf_name         = "openai/gsm8k",
+        local_path      = None,
+        config_name     = "main",
+        split           = "test",
+        label_method    = "exact_match",
+        label_gpu_mode  = "cpu",
+        fewshot_k       = 0,
+        batch_size      = 16,
+        max_gen_length  = 256,
+        steps           = 256,
+        block_size      = 32,
     ),
     Dataset.triviaqa: DatasetConfig(
-        hf_name        = "mandarjoshi/trivia_qa",
-        local_path     = None,
-        config_name    = "rc",
-        split          = "validation",
-        label_method   = "llm_judge",
-        label_gpu_mode = "gpu",
-        fewshot_k      = 0,
-        batch_size     = 32,
+        hf_name         = "mandarjoshi/trivia_qa",
+        local_path      = None,
+        config_name     = "rc",
+        split           = "validation",
+        label_method    = "llm_judge",
+        label_gpu_mode  = "gpu",
+        fewshot_k       = 0,
+        batch_size      = 32,
+        max_gen_length  = 32,
+        steps           = 32,
+        block_size      = 32,
     ),
     Dataset.wmt14_fr_en: DatasetConfig(
-        hf_name        = "wmt/wmt14",
-        local_path     = None,
-        config_name    = "fr-en",
-        split          = "test",
-        label_method   = "llm_judge",
-        label_gpu_mode = "gpu",
-        fewshot_k      = 0,
-        batch_size     = 16,
-    ),
-    Dataset.wmt14_de_en: DatasetConfig(
-        hf_name        = "wmt/wmt14",
-        local_path     = None,
-        config_name    = "de-en",
-        split          = "test",
-        label_method   = "llm_judge",
-        label_gpu_mode = "gpu",
-        fewshot_k      = 0,
-        batch_size     = 16,
+        hf_name         = "wmt/wmt14",
+        local_path      = None,
+        config_name     = "fr-en",
+        split           = "test",
+        label_method    = "llm_judge",
+        label_gpu_mode  = "gpu",
+        fewshot_k       = 0,
+        batch_size      = 16,
+        max_gen_length  = 128,
+        steps           = 128,
+        block_size      = 32,
     ),
     Dataset.xsum: DatasetConfig(
-        hf_name        = "EdinburghNLP/xsum",
-        local_path     = None,
-        config_name    = None,
-        split          = "test",
-        label_method   = "llm_judge",
-        label_gpu_mode = "gpu",
-        fewshot_k      = 0,
-        batch_size     = 16,
+        hf_name         = "EdinburghNLP/xsum",
+        local_path      = None,
+        config_name     = None,
+        split           = "test",
+        label_method    = "llm_judge",
+        label_gpu_mode  = "gpu",
+        fewshot_k       = 0,
+        batch_size      = 16,
+        max_gen_length  = 128,
+        steps           = 128,
+        block_size      = 32,
     ),
     Dataset.samsum: DatasetConfig(
-        hf_name        = "knkarthick/samsum",
-        local_path     = None,
-        config_name    = None,
-        split          = "test",
-        label_method   = "llm_judge",
-        label_gpu_mode = "gpu",
-        fewshot_k      = 0,
-        batch_size     = 16,
+        hf_name         = "knkarthick/samsum",
+        local_path      = None,
+        config_name     = None,
+        split           = "test",
+        label_method    = "llm_judge",
+        label_gpu_mode  = "gpu",
+        fewshot_k       = 0,
+        batch_size      = 16,
+        max_gen_length  = 128,
+        steps           = 128,
+        block_size      = 32,
     ),
     Dataset.hotpotqa: DatasetConfig(
-        hf_name        = "hotpotqa/hotpot_qa",
-        local_path     = None,
-        config_name    = "fullwiki",
-        split          = "validation",
-        label_method   = "llm_judge",
-        label_gpu_mode = "gpu",
-        fewshot_k      = 0,
-        batch_size     = 16,
+        hf_name         = "hotpotqa/hotpot_qa",
+        local_path      = None,
+        config_name     = "fullwiki",
+        split           = "validation",
+        label_method    = "llm_judge",
+        label_gpu_mode  = "gpu",
+        fewshot_k       = 0,
+        batch_size      = 16,
+        max_gen_length  = 64,
+        steps           = 64,
+        block_size      = 32,
     ),
     Dataset.musique: DatasetConfig(
-        hf_name        = "",
-        local_path     = "musique_data_v1.0/data/musique_full_v1.0_dev.jsonl",
-        config_name    = None,
-        split          = "train",
-        label_method   = "llm_judge",
-        label_gpu_mode = "gpu",
-        fewshot_k      = 0,
-        batch_size     = 16,
+        hf_name         = "",
+        local_path      = "musique_data_v1.0/data/musique_full_v1.0_dev.jsonl",
+        config_name     = None,
+        split           = "train",
+        label_method    = "llm_judge",
+        label_gpu_mode  = "gpu",
+        fewshot_k       = 0,
+        batch_size      = 16,
+        max_gen_length  = 64,
+        steps           = 64,
+        block_size      = 32,
     ),
 }
 
@@ -176,11 +178,13 @@ GENERATION_DEFAULTS: dict[str, Any] = {
     "model_id":               "GSAI-ML/LLaDA-8B-Instruct",
     "seed":                   42,
     "steps":                  128,
-    "gen_length":             128,
+    "max_gen_length":         128,
+    "block_size":             None,
     "temperature":            0.0,
+    "cfg_scale":              0.0,
     "remasking":              "lc",
     "batch_size":             8,
-    "topk_trace_k":           64,
+    "top_k":                  64,
     "num_response_samples":   20,
     "generate_greedy":        True,
     "num_questions":          1000,
@@ -197,15 +201,18 @@ GENERATION_DEFAULTS: dict[str, Any] = {
 def run_id(
     model: Model,
     dataset: Dataset,
-    length: int,
+    max_gen_length: int,
     steps: int,
     remasking: Remasking,
     *,
+    block_size: int | None = None,
     temperature: float | None = None,
     fewshot_k: int | None = None,
 ) -> str:
     """Build the canonical run identifier used for output directory naming."""
-    rid = f"{model.value}_{dataset.value}_l{length}_s{steps}_{remasking.value}"
+    rid = f"{model.value}_{dataset.value}_l{max_gen_length}_s{steps}_{remasking.value}"
+    if block_size is not None:
+        rid = f"{rid}_b{block_size}"
     if temperature is not None:
         safe_t = str(temperature).replace("+", "").replace("-", "m").replace(".", "p")
         rid = f"{rid}_t{safe_t}"
@@ -217,15 +224,18 @@ def run_id(
 def config_filename(
     model: Model,
     dataset: Dataset,
-    length: int,
+    max_gen_length: int,
     steps: int,
     remasking: Remasking,
     *,
+    block_size: int | None = None,
     fewshot_k: int | None = None,
     confidence_eos_eot_inf: bool = False,
 ) -> str:
     """Build the config JSON filename."""
-    base = f"{model.value}_{dataset.value}_l{length}_s{steps}_{remasking.value}"
+    base = f"{model.value}_{dataset.value}_l{max_gen_length}_s{steps}_{remasking.value}"
+    if block_size is not None:
+        base = f"{base}_b{block_size}"
     if fewshot_k is not None and fewshot_k > 0:
         base = f"{base}_fs{fewshot_k}"
     if confidence_eos_eot_inf:
@@ -236,44 +246,52 @@ def config_filename(
 def build_generation_config(
     model: Model,
     dataset: Dataset,
-    length: int,
-    steps: int,
-    remasking: Remasking,
+    max_gen_length: int | None = None,
+    steps: int | None = None,
+    remasking: Remasking = Remasking.lc,
     *,
+    block_size: int | None = ...,
     num_questions: int = 1000,
     temperature: float = 1.0,
     num_response_samples: int = 20,
     generate_greedy: bool = True,
-    topk_trace_k: int = 64,
+    top_k: int = 64,
     fewshot_k: int | None = None,
     confidence_eos_eot_inf: bool = False,
     cfg_scale: float = 0.0,
     **overrides: Any,
 ) -> dict[str, Any]:
-    """Build a complete generation config from canonical parameters."""
+    """Build a complete generation config from canonical parameters.
+
+    When *max_gen_length*, *steps*, or *block_size* is omitted the per-dataset
+    default from ``DATASET_CONFIGS`` is used.  Pass ``block_size=None``
+    explicitly to force no blocking regardless of the dataset default.
+    """
     ds = DATASET_CONFIGS[dataset]
     resolved_fewshot_k = ds.fewshot_k if fewshot_k is None else fewshot_k
+    resolved_length = ds.max_gen_length if max_gen_length is None else max_gen_length
+    resolved_steps = ds.steps if steps is None else steps
+    resolved_block_size = ds.block_size if block_size is ... else block_size
     config: dict[str, Any] = {
         "model_family":          "DLM",
         "model_id":              MODEL_HF_IDS[model],
-        "model_backend":         MODEL_BACKENDS[model],
         "dataset":               dataset.value,
         "dataset_config_name":   ds.config_name,
         "split":                 ds.split,
         "label_method":          ds.label_method,
         "batch_size":            ds.batch_size,
         "num_questions":         num_questions,
-        "gen_length":            length,
-        "steps":                 steps,
+        "max_gen_length":        resolved_length,
+        "steps":                 resolved_steps,
+        "block_size":            resolved_block_size,
         "remasking":             remasking.value,
         "temperature":           temperature,
+        "cfg_scale":             cfg_scale,
         "num_response_samples":  num_response_samples,
         "generate_greedy":       generate_greedy,
-        "topk_trace_k":          topk_trace_k,
+        "top_k":                 top_k,
         "fewshot_k":             resolved_fewshot_k,
-        "save_full_trace":       True,
         "confidence_eos_eot_inf": confidence_eos_eot_inf,
-        "cfg_scale":             cfg_scale,
     }
     config.update(overrides)
     return config
@@ -291,12 +309,15 @@ def derive_run_id(config: dict[str, Any]) -> str:
     except (ValueError, KeyError):
         return "default"
     fewshot_k = int(config.get("fewshot_k") or 0)
-    return run_id(
+    bs = config.get("block_size")
+    rid = run_id(
         model_enum, dataset_enum,
-        int(config["gen_length"]), int(config["steps"]),
+        int(config["max_gen_length"]), int(config["steps"]),
         remasking_enum,
+        block_size=int(bs) if bs is not None else None,
         fewshot_k=fewshot_k if fewshot_k > 0 else None,
     )
+    return rid
 
 
 def resolve_remasking(short_name: str) -> str:

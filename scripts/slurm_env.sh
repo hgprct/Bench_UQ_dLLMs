@@ -2,35 +2,52 @@
 
 set -euo pipefail
 
-# Détection automatique du dossier projet
-if [ -z "${PROJECT_DIR:-}" ]; then
+# ── Resolve PROJECT_DIR ──────────────────────────────────────────────────
+# Prefer PROJECT_PATH from .env, then fall back to filesystem detection.
+if [[ -n "${PROJECT_PATH:-}" ]]; then
+  export PROJECT_DIR="$PROJECT_PATH"
+elif [[ -z "${PROJECT_DIR:-}" ]]; then
   _senv_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   export PROJECT_DIR="$(dirname "$_senv_dir")"
 fi
 
+# ── Resolve STAGE_DIR ────────────────────────────────────────────────────
+# .env sets STAGE_DIR_PATH; bashrc sets STAGE_DIR. Accept either.
+export STAGE_DIR="${STAGE_DIR:-${STAGE_DIR_PATH:-}}"
+
 init_uq_slurm_env() {
-  # UQ_IMAGE selects the container: "dlm" (default) or "nemotron"
-  local image_variant="${UQ_IMAGE:-dlm}"
-  case "$image_variant" in
-    dlm)
-      export IMAGE="${STAGE_DIR}/code/uncertainty-DLM/my_project.sif"
-      export OVERLAY="${STAGE_DIR}/code/uncertainty-DLM/overlay.img"
-      ;;
-    nemotron)
-      export IMAGE="${STAGE_DIR}/code/uncertainty-DLM/my_project_nemotron.sif"
-      export OVERLAY="${STAGE_DIR}/code/uncertainty-DLM/overlay_nemotron.img"
-      ;;
-    *)
-      echo "ERROR: unknown UQ_IMAGE='$image_variant'. Use 'dlm' or 'nemotron'." >&2
-      exit 1
-      ;;
-  esac
+  if [[ -z "$STAGE_DIR" ]]; then
+    echo "ERROR: STAGE_DIR (or STAGE_DIR_PATH in .env) is not set." >&2
+    exit 1
+  fi
+
+  # Use CONTAINER_IMAGE from .env when available; otherwise derive from
+  # UQ_IMAGE variant (dlm / nemotron).
+  if [[ -n "${CONTAINER_IMAGE:-}" ]]; then
+    export IMAGE="$CONTAINER_IMAGE"
+    export OVERLAY="$(dirname "$IMAGE")/overlay.img"
+  else
+    local image_variant="${UQ_IMAGE:-dlm}"
+    case "$image_variant" in
+      dlm)
+        export IMAGE="${STAGE_DIR}/code/Bench_UQ_dLLMs/my_project.sif"
+        export OVERLAY="${STAGE_DIR}/code/Bench_UQ_dLLMs/overlay.img"
+        ;;
+      nemotron)
+        export IMAGE="${STAGE_DIR}/code/Bench_UQ_dLLMs/my_project_nemotron.sif"
+        export OVERLAY="${STAGE_DIR}/code/Bench_UQ_dLLMs/overlay_nemotron.img"
+        ;;
+      *)
+        echo "ERROR: unknown UQ_IMAGE='$image_variant'. Use 'dlm' or 'nemotron'." >&2
+        exit 1
+        ;;
+    esac
+  fi
 
   export PYTHONUNBUFFERED=1
   export TOKENIZERS_PARALLELISM=false
   unset TRANSFORMERS_CACHE
 
-  # Les dossiers de cache (HF, Apptainer) sont déjà gérés dans votre ~/.bashrc
   mkdir -p "${STAGE_DIR}/logs"
 
   cd "$PROJECT_DIR"

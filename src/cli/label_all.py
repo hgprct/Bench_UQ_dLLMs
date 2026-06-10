@@ -33,7 +33,7 @@ def _discover_runs(folder: Path, exclude: set[str]) -> list[Path]:
         if d.name in exclude:
             print(f"[label_all] Skipping excluded: {d.name}")
             continue
-        if (d / "config.json").exists() and (d / "examples.jsonl").exists():
+        if (d / "config.json").exists() and (d / "answers.jsonl").exists():
             runs.append(d)
     return runs
 
@@ -61,7 +61,7 @@ def _label_run(
     from src.labeling import label_records
 
     ds_config = DATASET_CONFIGS[Dataset(dataset_key)]
-    records = read_jsonl(run_dir / "examples.jsonl")
+    records = read_jsonl(run_dir / "answers.jsonl")
 
     print(f"[label_all] {run_dir.name}: {len(records)} records, method='{ds_config.label_method}'")
 
@@ -73,11 +73,11 @@ def _label_run(
         force=force,
     )
 
-    with open(run_dir / "examples.jsonl", "w") as f:
+    with open(run_dir / "answers.jsonl", "w") as f:
         for record in records:
             f.write(json.dumps(record, ensure_ascii=True, allow_nan=False) + "\n")
 
-    print(f"[label_all] Labeled {labeled} records. Updated {run_dir / 'examples.jsonl'}")
+    print(f"[label_all] Labeled {labeled} records. Updated {run_dir / 'answers.jsonl'}")
     if print_examples:
         _print_accuracy(records, run_dir.name)
 

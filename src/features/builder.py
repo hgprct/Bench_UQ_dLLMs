@@ -37,17 +37,14 @@ def build_feature_rows(
     sample_nli_max_items: int | None = None,
     progress_every: int = 10,
 ) -> list[dict[str, Any]]:
-    """Build one feature row per original prompt from a generation run.
-
-    prompt_batch_size controls how many prompts' NLI pairs are prefetched
-    together in one GPU pass (0 = all at once).
-    """
+    """Build one feature row per original prompt from a generation run."""
     run_dir = Path(run_dir)
     config = read_json(run_dir / "config.json")
-    records = read_jsonl(run_dir / "examples.jsonl")
 
-    traces_path = run_dir / "traces.npz"
-    traces = dict(np.load(traces_path, allow_pickle=False)) if traces_path.exists() else {}
+    records = read_jsonl(run_dir / "answers.jsonl")
+
+    topk_path = run_dir / "topk_logprobs.npz"
+    topk = dict(np.load(topk_path, allow_pickle=False)) if topk_path.exists() else {}
 
     special, eos = special_ids_from_config(config)
     cached_nli = CachedEntailmentModel(nli_model) if nli_model is not None else None
@@ -71,12 +68,11 @@ def build_feature_rows(
                 "is_correct": greedy.get("label") if greedy else None,
             }
 
-            if greedy and traces:
+            if greedy and topk:
                 sample_idx = greedy.get("sample_id", 0)
-                final_logprobs = _extract_final_logprobs(traces, sample_idx)
-                final_topk = _extract_final_topk_logits(traces, sample_idx)
-                final_tids = _extract_final_token_ids(traces, sample_idx)
-                vis_pos = visible_positions(final_tids, special_ids=special, eos_ids=eos) if final_tids is not None else []
+                final_logprobs = _extract_logprobs(topk, sample_idx)
+                final_topk = _extract_topk_logprobs(topk, sample_idx)
+                vis_pos = list(range(final_logprobs.shape[0])) if final_logprobs is not None else []
                 row["n_visible_tokens"] = len(vis_pos)
                 row["msp"] = compute_msp(final_logprobs, visible_positions=vis_pos) if final_logprobs is not None else None
                 row["perplexity"] = compute_perplexity(final_logprobs, visible_positions=vis_pos) if final_logprobs is not None else None
@@ -94,10 +90,10 @@ def build_feature_rows(
                 nli_feats = compute_sampling_features(texts, cached_nli, nli_batch_size=nli_batch_size, max_items=sample_nli_max_items)
                 row.update(nli_feats)
 
-            if sampled and traces:
-                sample_lps, sample_tids = _extract_sampled_final_logprobs(traces, sampled)
+            if sampled and topk:
+                sample_lps = _extract_sampled_logprobs(topk, sampled)
                 if sample_lps:
-                    row["mcnse"] = compute_mcnse(sample_lps, sample_tids, special_ids=special, eos_ids=eos)
+                    row["mcnse"] = compute_mcnse(sample_lps, [None] * len(sample_lps), special_ids=special, eos_ids=eos)
 
             rows.append(row)
             if progress_every and (prompt_idx + 1) % progress_every == 0:
@@ -112,7 +108,6 @@ def _prefetch_nli_batch(
     nli_batch_size: int,
     sample_nli_max_items: int | None,
 ) -> None:
-    """Collect NLI pairs from all prompts in a batch and warm the cache in one GPU pass."""
     from src.features.sampling import _subsample_indices
 
     all_premises: list[str] = []
@@ -137,7 +132,6 @@ def _prefetch_nli_batch(
 
 
 def _group_by_prompt(records: list[dict], config: dict) -> dict[str, list[dict]]:
-    """Group records by prompt ID."""
     from collections import OrderedDict
     grouped: OrderedDict[str, list[dict]] = OrderedDict()
     num_samples = int(config.get("num_response_samples", 1) or 1)
@@ -151,7 +145,6 @@ def _group_by_prompt(records: list[dict], config: dict) -> dict[str, list[dict]]
 
 
 def _partition_greedy_sampled(records: list[dict]) -> tuple[dict | None, list[dict]]:
-    """Split records into greedy (first) and sampled (rest)."""
     greedy = None
     sampled = []
     for record in records:
@@ -167,7 +160,6 @@ def _partition_greedy_sampled(records: list[dict]) -> tuple[dict | None, list[di
 
 
 def _final_answer(record: dict) -> str:
-    """Extract the final answer text from a record."""
     raw = record.get("raw_answer")
     if raw is not None:
         return str(raw).strip()
@@ -175,49 +167,32 @@ def _final_answer(record: dict) -> str:
     return str(final.get("answer", final.get("response", ""))).strip()
 
 
-def _extract_final_logprobs(traces: dict, sample_idx: int) -> np.ndarray | None:
-    lp = traces.get("x0_token_logprobs")
-    if lp is None:
-        return None
-    if lp.ndim == 3 and sample_idx < lp.shape[0]:
-        return lp[sample_idx, -1]
+def _extract_logprobs(topk: dict, sample_idx: int) -> np.ndarray | None:
+    """Extract per-token logprobs (top-1) for a sample."""
+    lp = topk.get("topk_logprobs")
+    if lp is not None and lp.ndim == 3 and sample_idx < lp.shape[0]:
+        return lp[sample_idx, :, 0]
     return None
 
 
-def _extract_final_topk_logits(traces: dict, sample_idx: int) -> np.ndarray | None:
-    tk = traces.get("topk_logits")
-    if tk is None:
-        return None
-    if tk.ndim == 4 and sample_idx < tk.shape[0]:
-        return tk[sample_idx, -1]
+def _extract_topk_logprobs(topk: dict, sample_idx: int) -> np.ndarray | None:
+    """Extract top-k logprobs matrix for a sample."""
+    tk = topk.get("topk_logprobs")
+    if tk is not None and tk.ndim == 3 and sample_idx < tk.shape[0]:
+        return tk[sample_idx]
     return None
 
 
-def _extract_final_token_ids(traces: dict, sample_idx: int) -> np.ndarray | None:
-    tids = traces.get("response_token_ids")
-    if tids is None:
-        return None
-    if tids.ndim == 3 and sample_idx < tids.shape[0]:
-        return tids[sample_idx, -1]
-    return None
-
-
-def _extract_sampled_final_logprobs(
-    traces: dict,
+def _extract_sampled_logprobs(
+    topk: dict,
     sampled_records: list[dict],
-) -> tuple[list[np.ndarray], list[np.ndarray]]:
-    """Extract final-step logprobs and token IDs for each sampled response."""
+) -> list[np.ndarray]:
     logprobs_list: list[np.ndarray] = []
-    token_ids_list: list[np.ndarray] = []
     for r in sampled_records:
         sid = r.get("sample_id")
         if sid is None:
             continue
-        lp = _extract_final_logprobs(traces, int(sid))
-        tids = _extract_final_token_ids(traces, int(sid))
-        if lp is not None and tids is not None:
+        lp = _extract_logprobs(topk, int(sid))
+        if lp is not None:
             logprobs_list.append(lp)
-            token_ids_list.append(tids)
-    return logprobs_list, token_ids_list
-
-
+    return logprobs_list

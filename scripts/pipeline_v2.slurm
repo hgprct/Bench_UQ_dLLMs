@@ -13,7 +13,7 @@ set -euo pipefail
 #   sbatch scripts/pipeline_v2.slurm <model> <dataset> <num_response_samples> <length> <steps> <remasking>
 #
 # Models:   LLaDA, LLaDA1.5, Dream
-# Datasets: triviaqa, gsm8k, wmt14_fr_en, wmt14_de_en, xsum, samsum
+# Datasets: triviaqa, gsm8k, wmt14_fr_en, xsum, samsum
 # Remasking: lc, rd
 #
 # Examples:
@@ -45,8 +45,8 @@ case "$MODEL" in
 esac
 
 case "$DATASET" in
-  triviaqa|gsm8k|wmt14_fr_en|wmt14_de_en|xsum|samsum) ;;
-  *) echo "ERROR: dataset must be one of: triviaqa, gsm8k, wmt14_fr_en, wmt14_de_en, xsum, samsum (got '$DATASET')"; exit 1 ;;
+  triviaqa|gsm8k|wmt14_fr_en|xsum|samsum|hotpotqa|musique) ;;
+  *) echo "ERROR: dataset must be one of: triviaqa, gsm8k, wmt14_fr_en, xsum, samsum, hotpotqa, musique (got '$DATASET')"; exit 1 ;;
 esac
 
 case "$REMASKING" in

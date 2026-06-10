@@ -1,0 +1,14 @@
+/lustre/home/extusers/udld187d1/stage/code/Bench_UQ_dLLMs/configs/LLaDA1.5_gsm8k_l256_s256_lc_b32.json
+/lustre/home/extusers/udld187d1/stage/code/Bench_UQ_dLLMs/configs/LLaDA1.5_gsm8k_l256_s256_rd_b32.json
+/lustre/home/extusers/udld187d1/stage/code/Bench_UQ_dLLMs/configs/LLaDA1.5_hotpotqa_l64_s64_lc_b32.json
+/lustre/home/extusers/udld187d1/stage/code/Bench_UQ_dLLMs/configs/LLaDA1.5_hotpotqa_l64_s64_rd_b32.json
+/lustre/home/extusers/udld187d1/stage/code/Bench_UQ_dLLMs/configs/LLaDA1.5_musique_l64_s64_lc_b32.json
+/lustre/home/extusers/udld187d1/stage/code/Bench_UQ_dLLMs/configs/LLaDA1.5_musique_l64_s64_rd_b32.json
+/lustre/home/extusers/udld187d1/stage/code/Bench_UQ_dLLMs/configs/LLaDA1.5_samsum_l128_s128_lc_b32.json
+/lustre/home/extusers/udld187d1/stage/code/Bench_UQ_dLLMs/configs/LLaDA1.5_samsum_l128_s128_rd_b32.json
+/lustre/home/extusers/udld187d1/stage/code/Bench_UQ_dLLMs/configs/LLaDA1.5_triviaqa_l32_s32_lc_b32.json
+/lustre/home/extusers/udld187d1/stage/code/Bench_UQ_dLLMs/configs/LLaDA1.5_triviaqa_l32_s32_rd_b32.json
+/lustre/home/extusers/udld187d1/stage/code/Bench_UQ_dLLMs/configs/LLaDA1.5_wmt14_fr_en_l128_s128_lc_b32.json
+/lustre/home/extusers/udld187d1/stage/code/Bench_UQ_dLLMs/configs/LLaDA1.5_wmt14_fr_en_l128_s128_rd_b32.json
+/lustre/home/extusers/udld187d1/stage/code/Bench_UQ_dLLMs/configs/LLaDA1.5_xsum_l128_s128_lc_b32.json
+/lustre/home/extusers/udld187d1/stage/code/Bench_UQ_dLLMs/configs/LLaDA1.5_xsum_l128_s128_rd_b32.json

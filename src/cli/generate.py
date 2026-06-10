@@ -1,4 +1,4 @@
-"""CLI entry point for Stage 1: Generate QA traces."""
+"""CLI entry point for generation: produce answers + top-k logprobs."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ import os
 
 import torch
 
-from src.generate import generate as generate_fn
-from src.generate.traces import save_trace_collection
+from src.generate import calibrate_batch_size, generate as generate_fn
+from src.generate.traces import save_results
 from src.config import (
     Dataset, GENERATION_DEFAULTS, Model, Remasking,
     build_generation_config, derive_run_id, load_config, resolve_remasking,
@@ -19,11 +19,9 @@ from src.datasets.dataloader import (
     apply_chat_template,
     expand_greedy_and_sampled,
     expand_response_samples,
-    interleave_traces,
     load_prompts_jsonl,
     prepare_dataset_inputs,
 )
-
 from src.generate.model import (
     infer_eos_token_ids, infer_mask_token_id,
     load_model, load_tokenizer, pad_token_id as get_pad_token_id,
@@ -32,13 +30,13 @@ from src.generate.model import (
 
 _CLI_OVERRIDE_KEYS = (
     "num_questions", "num_response_samples", "batch_size", "steps",
-    "gen_length", "temperature", "generate_greedy",
-    "remasking", "mask_id",
-    "topk_trace_k", "fewshot_k", "confidence_eos_eot_inf", "seed",
+    "max_gen_length", "block_size", "temperature", "cfg_scale",
+    "generate_greedy", "remasking", "mask_id",
+    "top_k", "fewshot_k", "confidence_eos_eot_inf", "seed",
 )
 
+
 def select_device() -> torch.device:
-    """Select the CUDA device with the most free memory, or CPU."""
     if not torch.cuda.is_available():
         return torch.device("cpu")
     if torch.cuda.device_count() == 1:
@@ -52,8 +50,9 @@ def select_device() -> torch.device:
             best_device = i
     return torch.device(f"cuda:{best_device}")
 
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate dLLM QA traces.")
+    parser = argparse.ArgumentParser(description="Generate dLLM answers + top-k logprobs.")
     src = parser.add_argument_group("config source (pick one)")
     src.add_argument("--config", help="Path to generation config JSON")
     src.add_argument("--model", choices=[m.value for m in Model],
@@ -65,15 +64,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--num_response_samples", type=int)
     parser.add_argument("--batch_size", type=int)
     parser.add_argument("--steps", type=int)
-    parser.add_argument("--gen_length", type=int)
+    parser.add_argument("--max_gen_length", type=int)
+    parser.add_argument("--block_size", type=int)
     parser.add_argument("--temperature", type=float)
+    parser.add_argument("--cfg_scale", type=float)
     parser.add_argument("--generate_greedy", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--remasking", choices=["lc", "rd"])
     parser.add_argument("--mask_id", type=int)
-    parser.add_argument("--topk_trace_k", type=int)
+    parser.add_argument("--top_k", type=int)
     parser.add_argument("--fewshot_k", type=int)
     parser.add_argument("--confidence_eos_eot_inf", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--seed", type=int)
+    parser.add_argument("--auto_batch_size", action=argparse.BooleanOptionalAction, default=True,
+                        help="Auto-calibrate batch size to fit GPU memory (default: True). "
+                             "Disabled when --batch_size is explicitly set.")
     parser.add_argument("--prompts", help="Path to prompts.jsonl (from prepare stage)")
     parser.add_argument("--output_dir")
     args = parser.parse_args(argv)
@@ -85,7 +89,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _apply_config(config: dict, args: argparse.Namespace) -> None:
-    """Apply CLI overrides and set defaults in the config dictionary."""
     for key in _CLI_OVERRIDE_KEYS:
         val = getattr(args, key, None)
         if val is not None:
@@ -94,20 +97,11 @@ def _apply_config(config: dict, args: argparse.Namespace) -> None:
         config["run_id"] = args.run_id
     for key, default in GENERATION_DEFAULTS.items():
         config.setdefault(key, default)
-    model_id = config["model_id"]
-    backend = config.get("model_backend", "llada")
-    if "dream" in model_id.lower():
-        backend = "dream"
-    elif "nemotron" in model_id.lower():
-        backend = "nemotron"
-    config["model_backend"] = backend
 
 
 def _setup_model(config: dict, device):
-    """Load the model and tokenizer, and infer EOS and mask token IDs."""
-
     model_id = config["model_id"]
-    model = load_model(model_id, device) # Load the model
+    model = load_model(model_id, device)
     tokenizer = load_tokenizer(model_id)
     if tokenizer.padding_side != "left":
         tokenizer.padding_side = "left"
@@ -118,7 +112,7 @@ def _setup_model(config: dict, device):
         if eos_token_ids:
             tokenizer.pad_token_id = eos_token_ids[0]
             ptid = tokenizer.pad_token_id
-            print(f"[DLM] No pad_token_id; using EOS id {ptid}")
+            print(f"[gen] No pad_token_id; using EOS id {ptid}")
         else:
             raise ValueError("No pad_token_id and no EOS tokens available")
 
@@ -132,7 +126,6 @@ def _setup_model(config: dict, device):
 
 
 def _load_or_prepare_inputs(config, args, tokenizer, output_dir):
-    """Load prompts from file if available, otherwise prepare them from the dataset config."""
     prompts_path = args.prompts or os.path.join(output_dir, "prompts.jsonl")
     if os.path.isfile(prompts_path):
         print(f"Loading prepared prompts from {prompts_path}...")
@@ -142,7 +135,7 @@ def _load_or_prepare_inputs(config, args, tokenizer, output_dir):
     else:
         fewshot_k = int(config["fewshot_k"])
         if fewshot_k > 0:
-            print(f"[DLM] Few-shot: {fewshot_k} examples")
+            print(f"[gen] Few-shot: {fewshot_k} examples")
         hf_token = os.environ.get("HF_TOKEN", "")
         print("Preparing dataset inputs inline...")
         dataset_key, qa_pairs, prompts = prepare_dataset_inputs(config, tokenizer, hf_token)
@@ -150,9 +143,7 @@ def _load_or_prepare_inputs(config, args, tokenizer, output_dir):
     return dataset_key, qa_pairs, prompts
 
 
-def _run_generation(generate_fn, qa_pairs, prompts, config, common_kwargs, seed):
-    """Run the generation function with the appropriate parameters based on the config."""
-
+def _run_generation(qa_pairs, prompts, config, common_kwargs, seed):
     num_sampled = int(config["num_response_samples"])
     temperature = float(config["temperature"])
     generate_greedy = bool(config["generate_greedy"])
@@ -163,31 +154,32 @@ def _run_generation(generate_fn, qa_pairs, prompts, config, common_kwargs, seed)
 
         if generate_greedy:
             total = 1 + num_sampled
-            print(f"[DLM] Two-pass: 1 greedy + {num_sampled} sampled (T={temperature})")
+            print(f"[gen] Two-pass: 1 greedy + {num_sampled} sampled (T={temperature})")
 
-            greedy_answers, greedy_traces = generate_fn(prompts=prompts, temperature=0.0, **common_kwargs)
+            greedy_answers, greedy_topk = generate_fn(prompts=prompts, temperature=0.0, **common_kwargs)
 
             seed_everything(seed + 1)
             sampled_qa, sampled_prompts = expand_response_samples(qa_pairs, prompts, num_sampled)
-            sampled_answers, sampled_traces = generate_fn(prompts=sampled_prompts, temperature=temperature, **common_kwargs)
+            sampled_answers, sampled_topk = generate_fn(prompts=sampled_prompts, temperature=temperature, **common_kwargs)
 
-            rich_traces = interleave_traces(greedy_traces, sampled_traces, len(qa_pairs), num_sampled)
             merged_qa, merged_prompts = expand_greedy_and_sampled(qa_pairs, prompts, num_sampled)
             all_answers = _interleave_answers(greedy_answers, sampled_answers, len(qa_pairs), num_sampled)
+            topk_data = _interleave_topk(greedy_topk, sampled_topk, len(qa_pairs), num_sampled)
             config["num_response_samples"] = total
         else:
-            print(f"[DLM] Sampled-only: {num_sampled} samples per prompt (T={temperature})")
+            print(f"[gen] Sampled-only: {num_sampled} samples per prompt (T={temperature})")
             merged_qa, merged_prompts = expand_response_samples(qa_pairs, prompts, num_sampled)
-            all_answers, rich_traces = generate_fn(prompts=merged_prompts, temperature=temperature, **common_kwargs)
+            all_answers, topk_data = generate_fn(prompts=merged_prompts, temperature=temperature, **common_kwargs)
     else:
         if num_sampled > 1:
-            print(f"[DLM] temperature=0: ignoring num_response_samples={num_sampled}, generating 1 greedy response per prompt")
-        print("[DLM] Greedy-only: 1 deterministic response per prompt")
+            print(f"[gen] temperature=0: ignoring num_response_samples={num_sampled}, generating 1 greedy response per prompt")
+        print("[gen] Greedy-only: 1 deterministic response per prompt")
         merged_qa, merged_prompts = list(qa_pairs), list(prompts)
-        all_answers, rich_traces = generate_fn(prompts=merged_prompts, temperature=0.0, **common_kwargs)
+        all_answers, topk_data = generate_fn(prompts=merged_prompts, temperature=0.0, **common_kwargs)
         config["num_response_samples"] = 1
 
-    return merged_qa, merged_prompts, all_answers, rich_traces
+    return merged_qa, merged_prompts, all_answers, topk_data
+
 
 def _interleave_answers(
     greedy_answers: list[str],
@@ -198,46 +190,36 @@ def _interleave_answers(
     merged = []
     for q in range(num_questions):
         merged.append(greedy_answers[q])
-        merged.extend(sampled_answers[q * num_sampled:(q + 1) * num_sampled])
+        merged.extend(sampled_answers[q * num_sampled : (q + 1) * num_sampled])
     return merged
 
 
-def _write_answers_jsonl(
-    output_dir: str,
-    qa_pairs: list[dict],
-    prompts: list[str],
-    answers: list[str],
-    config_temperature: float,
-) -> None:
-    path = os.path.join(output_dir, "answers.jsonl")
-    with open(path, "w") as f:
-        for qa, prompt, answer in zip(qa_pairs, prompts, answers):
-            mode = qa.get("generation_mode") if isinstance(qa, dict) else None
-            if mode == "greedy" or config_temperature == 0:
-                t = 0.0
-            else:
-                t = config_temperature
-            question = qa.get("question", "") if isinstance(qa, dict) else ""
-            reference_answer = qa.get("reference_answer", "") if isinstance(qa, dict) else ""
-            record = {
-                "prompt": prompt,
-                "question": question,
-                "reference_answer": reference_answer,
-                "temperature": t,
-                "answer": answer,
-            }
-            f.write(json.dumps(record, ensure_ascii=True) + "\n")
-    print(f"Answers: {path} ({len(answers)} entries)")
+def _interleave_topk(
+    greedy_topk: dict[str, torch.Tensor],
+    sampled_topk: dict[str, torch.Tensor],
+    num_questions: int,
+    num_sampled: int,
+) -> dict[str, torch.Tensor]:
+    interleaved = {}
+    for key in sorted(greedy_topk):
+        gt = greedy_topk[key]
+        st = sampled_topk[key]
+        chunks = []
+        for q in range(num_questions):
+            chunks.append(gt[q : q + 1])
+            chunks.append(st[q * num_sampled : (q + 1) * num_sampled])
+        interleaved[key] = torch.cat(chunks, dim=0)
+    return interleaved
+
 
 def _resolve_config(args: argparse.Namespace) -> dict:
-    """Build a generation config from --config file or --model/--dataset flags."""
     if args.config:
         return load_config(args.config)
     return build_generation_config(
         Model(args.model),
         Dataset(args.dataset),
-        args.gen_length or GENERATION_DEFAULTS["gen_length"],
-        args.steps or GENERATION_DEFAULTS["steps"],
+        args.max_gen_length,
+        args.steps,
         Remasking(args.remasking or GENERATION_DEFAULTS["remasking"]),
     )
 
@@ -247,71 +229,82 @@ def main(argv: list[str] | None = None) -> None:
     config = _resolve_config(args)
     _apply_config(config, args)
 
-    # Set random seed for reproducibility
     seed = int(config["seed"])
     seed_everything(seed)
 
-    # Set run_id and output directory for logging and saving results
     run_id = str(config.get("run_id") or derive_run_id(config))
     output_dir = args.output_dir or config.get("output_dir") or os.path.join("outputs", run_id)
     config["run_id"] = run_id
 
-    # Select device
     try:
         device = select_device()
     except ImportError:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"[DLM] Using device: {device}")
+    print(f"[gen] Device: {device}")
+    print(f"[gen] Model: {config['model_id']}")
 
-    # Load model, tokenizer, and prepare dataset inputs (prompts)
-    backend = config["model_backend"]
-    print(f"[DLM] Backend: {backend}, Model: {config['model_id']}")
     model, tokenizer, eos_token_ids, ptid = _setup_model(config, device)
     dataset_key, qa_pairs, prompts = _load_or_prepare_inputs(config, args, tokenizer, output_dir)
 
-    # Common kwargs for generation function (both greedy and sampled)
+    # Auto-calibrate batch size unless user explicitly provided --batch_size
+    use_auto_bs = args.auto_batch_size and args.batch_size is None
+    if use_auto_bs:
+        print("[gen] Calibrating batch size...")
+        calibrated_bs = calibrate_batch_size(
+            model, tokenizer, device,
+            prompts=prompts,
+            max_gen_length=config["max_gen_length"],
+            mask_id=config["mask_id"],
+            max_batch_size=64,
+        )
+        config["batch_size"] = calibrated_bs
+        print(f"[gen] Using auto-calibrated batch_size={calibrated_bs}")
+    else:
+        print(f"[gen] Using configured batch_size={config['batch_size']}")
+
+    block_size = config.get("block_size")
+    if block_size is not None:
+        block_size = int(block_size)
+
     common_kwargs = dict(
-        model=model, device=device, backend=backend,
+        model=model,
+        device=device,
         batch_size=config["batch_size"],
-        tokenizer=tokenizer, steps=config["steps"], gen_length=config["gen_length"],
+        tokenizer=tokenizer,
+        steps=config["steps"],
+        max_gen_length=config["max_gen_length"],
+        block_size=block_size,
+        cfg_scale=float(config.get("cfg_scale", 0.0)),
         remasking=resolve_remasking(config["remasking"]),
-        mask_id=config["mask_id"], eos_token_ids=eos_token_ids,
+        mask_id=config["mask_id"],
+        eos_token_ids=eos_token_ids,
         logits_eos_inf=config["logits_eos_inf"],
         confidence_eos_eot_inf=config["confidence_eos_eot_inf"],
-        save_trajectory=True, k_topk_logits=config["topk_trace_k"],
+        top_k=config["top_k"],
     )
 
-    # Run generation and collect traces
-    merged_qa, merged_prompts, all_answers, rich_traces = _run_generation(
-        generate_fn, qa_pairs, prompts, config, common_kwargs, seed,
+    merged_qa, merged_prompts, all_answers, topk_data = _run_generation(
+        qa_pairs, prompts, config, common_kwargs, seed,
     )
 
-    # Save complete trace collection to .npz file and metadata to metadata.json
     from src.registry import get_dataset_module
     dataset_module = get_dataset_module(dataset_key)
     parse_answer_fn = getattr(dataset_module, "parse_answer", None)
 
-    summary = save_trace_collection(
-        output_dir=output_dir, run_config=config, qa_pairs=merged_qa,
-        prompts=merged_prompts, rich_traces=rich_traces, tokenizer=tokenizer,
-        dataset_key=dataset_key, eos_token_ids=eos_token_ids, pad_token_id=ptid,
+    summary = save_results(
+        output_dir=output_dir,
+        run_config=config,
+        qa_pairs=merged_qa,
+        prompts=merged_prompts,
+        answers=all_answers,
+        topk_data=topk_data,
+        dataset_key=dataset_key,
         parse_answer=parse_answer_fn,
     )
 
-    # Save the generated answers to answers.jsonl for easy reference
-    _write_answers_jsonl(output_dir, merged_qa, merged_prompts, all_answers, float(config["temperature"]))
-
-    # Update metadata.json to include reference to answers.jsonl
-    metadata_path = os.path.join(output_dir, "metadata.json")
-    if os.path.exists(metadata_path):
-        with open(metadata_path) as f:
-            metadata = json.load(f)
-        metadata.setdefault("files", {})["answers"] = "answers.jsonl"
-        with open(metadata_path, "w") as f:
-            json.dump(metadata, f, indent=2)
-
     print(f"\nSaved to: {output_dir}")
     print(f"Examples: {summary['num_examples']}")
+
 
 if __name__ == "__main__":
     main()

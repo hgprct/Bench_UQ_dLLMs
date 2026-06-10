@@ -22,7 +22,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Compute baseline UQ features (token + iid-sample + full-trajectory) for all prompts.",
     )
-    parser.add_argument("--run_dir", required=True, help="Run directory with examples.jsonl, traces.npz, config.json")
+    parser.add_argument("--run_dir", required=True, help="Run directory with answers.jsonl, topk_logprobs.npz, config.json")
     parser.add_argument("--output", default=None, help="Output path (default: <run_dir>/baseline_features.jsonl)")
     parser.add_argument("--nli_model", default="microsoft/deberta-v2-xlarge-mnli")
     parser.add_argument("--nli_batch_size", type=int, default=512)
@@ -47,7 +47,7 @@ def main(argv: list[str] | None = None) -> None:
     run_dir = Path(args.run_dir)
     output = Path(args.output) if args.output else run_dir / "baseline_features.jsonl"
 
-    records = read_jsonl(run_dir / "examples.jsonl")
+    records = read_jsonl(run_dir / "answers.jsonl")
     excluded = unlabeled_prompt_ids(records)
     if excluded:
         print(f"[baseline] Excluding {len(excluded)} prompt(s) with ambiguous labels")

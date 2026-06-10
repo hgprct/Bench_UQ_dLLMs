@@ -5,7 +5,7 @@ import sys
 import pytest
 
 
-DIRECT_IMPORTS = [
+CORE_IMPORTS = [
     # (pip package name, python module to import)
     ("numpy", "numpy"),
     ("scipy", "scipy"),
@@ -17,6 +17,7 @@ DIRECT_IMPORTS = [
     ("datasets", "datasets"),
     ("sentence-transformers", "sentence_transformers"),
     ("cvxpy", "cvxpy"),
+    ("torchvision", "torchvision"),
 ]
 
 TRANSITIVE_IMPORTS = [
@@ -31,6 +32,17 @@ TRANSITIVE_IMPORTS = [
     ("multiprocess", "multiprocess"),
 ]
 
+GPU_IMPORTS = [
+    ("torch", "torch"),
+    ("vllm", "vllm"),
+    ("matplotlib", "matplotlib"),
+]
+
+DEV_IMPORTS = [
+    ("pytest", "pytest"),
+    ("ruff", "ruff"),
+]
+
 
 def _check_importable(module: str) -> None:
     # Run in a fresh subprocess so conftest's src/ sys.path injection
@@ -43,8 +55,8 @@ def _check_importable(module: str) -> None:
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize("pip_name,module", DIRECT_IMPORTS, ids=[m for _, m in DIRECT_IMPORTS])
-def test_direct_import(pip_name, module):
+@pytest.mark.parametrize("pip_name,module", CORE_IMPORTS, ids=[m for _, m in CORE_IMPORTS])
+def test_core_import(pip_name, module):
     _check_importable(module)
 
 
@@ -53,5 +65,11 @@ def test_transitive_import(pip_name, module):
     _check_importable(module)
 
 
-def test_comet_import():
-    pytest.importorskip("comet")
+@pytest.mark.parametrize("pip_name,module", GPU_IMPORTS, ids=[m for _, m in GPU_IMPORTS])
+def test_gpu_import(pip_name, module):
+    _check_importable(module)
+
+
+@pytest.mark.parametrize("pip_name,module", DEV_IMPORTS, ids=[m for _, m in DEV_IMPORTS])
+def test_dev_import(pip_name, module):
+    _check_importable(module)

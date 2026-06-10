@@ -1,6 +1,6 @@
 """CLI entry point: unified pipeline orchestrator.
 
-Runs all stages in sequence: prepare -> generate -> label -> split -> features -> evaluate -> export.
+Runs all stages in sequence: generate -> label -> split -> features -> evaluate -> export.
 Can also run individual stages via --stages.
 """
 
@@ -12,7 +12,6 @@ import sys
 from pathlib import Path
 
 from src.config import (
-    MODEL_BACKENDS,
     MODEL_HF_IDS,
     Dataset,
     Model,
@@ -24,7 +23,7 @@ from src.config import (
 )
 from src.seed import seed_everything
 
-ALL_STAGES = ("prepare", "generate", "label", "split", "features", "evaluate", "export")
+ALL_STAGES = ("generate", "label", "split", "features", "evaluate", "export")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -32,7 +31,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--model", required=True, choices=[m.value for m in Model])
     parser.add_argument("--dataset", required=True, choices=[d.value for d in Dataset])
     parser.add_argument("--num_response_samples", type=int, default=20)
-    parser.add_argument("--length", type=int, required=True, help="Generation length in tokens")
+    parser.add_argument("--length", type=int, required=True, help="Max generation length in tokens")
+    parser.add_argument("--block_size", type=int, default=None, help="Block-diffusion block size")
     parser.add_argument("--steps", type=int, required=True, help="Denoising steps")
     parser.add_argument("--remasking", required=True, choices=[r.value for r in Remasking])
 
@@ -67,15 +67,17 @@ def main(argv: list[str] | None = None) -> None:
     remasking = Remasking(args.remasking)
     fewshot_k = args.fewshot_k
     rid = build_run_id(model, dataset, args.length, args.steps, remasking,
+                        block_size=args.block_size,
                         temperature=args.temperature if args.temperature != 1.0 else None,
                         fewshot_k=fewshot_k if fewshot_k > 0 else None)
     run_dir = Path("outputs") / rid
     config_path = Path("configs") / config_filename(model, dataset, args.length, args.steps, remasking,
+                                                     block_size=args.block_size,
                                                      fewshot_k=fewshot_k if fewshot_k > 0 else None)
 
     print(f"{'='*60}")
     print(f"Pipeline: {rid}")
-    print(f"Model: {model.value} ({MODEL_BACKENDS[model]})")
+    print(f"Model: {model.value} ({MODEL_HF_IDS[model]})")
     print(f"Dataset: {dataset.value}")
     print(f"Run dir: {run_dir}")
     print(f"Stages: {' -> '.join(args.stages)}")
@@ -88,6 +90,7 @@ def main(argv: list[str] | None = None) -> None:
             overrides["batch_size"] = args.batch_size
         config = build_generation_config(
             model, dataset, args.length, args.steps, remasking,
+            block_size=args.block_size,
             num_questions=args.num_questions, temperature=args.temperature,
             num_response_samples=args.num_response_samples,
             generate_greedy=args.generate_greedy,
@@ -101,11 +104,6 @@ def main(argv: list[str] | None = None) -> None:
     features_path = run_dir / "uq_features.jsonl"
     metrics_json = run_dir / "uq_eval_metrics.json"
     metrics_csv = run_dir / "uq_eval_metrics.csv"
-
-    if "prepare" in args.stages:
-        print(f"\n{'='*60}\nStage: prepare\n{'='*60}")
-        from src.cli.prepare import main as prepare_main
-        prepare_main(["--config", str(config_path), "--output-root", "outputs"])
 
     if "generate" in args.stages:
         print(f"\n{'='*60}\nStage: generate\n{'='*60}")

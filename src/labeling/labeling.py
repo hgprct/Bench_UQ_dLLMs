@@ -7,7 +7,7 @@ label_qa_samples(samples, dataset_key, ...)
     writes the label field on each sample in-place.
 
 label_records(records, dataset_key, ...)
-    Pipeline entry point: given full example records from examples.jsonl,
+    Pipeline entry point: given full example records from answers.jsonl,
     labels greedy records in-place and returns the count labeled.
 """
 
@@ -58,7 +58,7 @@ def label_qa_samples(
 
 
 # ---------------------------------------------------------------------------
-# Pipeline record-level interface (works on full examples.jsonl records)
+# Pipeline record-level interface (works on full answers.jsonl records)
 # ---------------------------------------------------------------------------
 
 def label_records(
@@ -124,8 +124,18 @@ def unlabeled_prompt_ids(records: list[dict[str, Any]]) -> set[str]:
 # ---------------------------------------------------------------------------
 
 def _select_records_to_label(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Select greedy records for labeling (exclude sampled)."""
-    return [r for r in records if r.get("generation_mode") != "sampled"]
+    """Select records to label: greedy records, or first-per-prompt if no greedy exists."""
+    non_sampled = [r for r in records if r.get("generation_mode") != "sampled"]
+    if non_sampled:
+        return non_sampled
+    seen_prompts: set[str] = set()
+    first_per_prompt: list[dict[str, Any]] = []
+    for r in records:
+        pid = str(r.get("qa_example_id", r.get("sample_id", id(r))))
+        if pid not in seen_prompts:
+            seen_prompts.add(pid)
+            first_per_prompt.append(r)
+    return first_per_prompt
 
 
 def _exact_match_batch(

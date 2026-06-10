@@ -7,8 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from config import (
-    DATASET_DEFAULTS,
-    MODEL_BACKENDS,
+    DATASET_CONFIGS,
     MODEL_HF_IDS,
     REMASKING_FULL_NAMES,
     Dataset,
@@ -26,7 +25,6 @@ class TestEnums:
     def test_model_values(self):
         assert Model.LLaDA.value == "LLaDA"
         assert Model.LLaDA15.value == "LLaDA1.5"
-        assert Model.Dream.value == "Dream"
 
     def test_dataset_values(self):
         assert Dataset.triviaqa.value == "triviaqa"
@@ -45,13 +43,9 @@ class TestEnums:
         for model in Model:
             assert model in MODEL_HF_IDS
 
-    def test_all_models_have_backends(self):
-        for model in Model:
-            assert model in MODEL_BACKENDS
-
-    def test_all_datasets_have_defaults(self):
+    def test_all_datasets_have_configs(self):
         for dataset in Dataset:
-            assert dataset in DATASET_DEFAULTS
+            assert dataset in DATASET_CONFIGS
 
     def test_all_remaskings_have_full_names(self):
         for remasking in Remasking:
@@ -77,9 +71,13 @@ class TestRunId:
         result = run_id(Model.LLaDA, Dataset.triviaqa, 128, 64, Remasking.lc)
         assert result == "LLaDA_triviaqa_l128_s64_lc"
 
+    def test_with_block_size(self):
+        result = run_id(Model.LLaDA, Dataset.triviaqa, 128, 64, Remasking.lc, block_size=32)
+        assert result == "LLaDA_triviaqa_l128_s64_lc_b32"
+
     def test_with_temperature(self):
-        result = run_id(Model.Dream, Dataset.gsm8k, 64, 32, Remasking.rd, temperature=0.7)
-        assert result == "Dream_gsm8k_l64_s32_rd_t0p7"
+        result = run_id(Model.LLaDA15, Dataset.gsm8k, 64, 32, Remasking.rd, temperature=0.7)
+        assert result == "LLaDA1.5_gsm8k_l64_s32_rd_t0p7"
 
     def test_temperature_negative(self):
         result = run_id(Model.LLaDA15, Dataset.wmt14_fr_en, 128, 64, Remasking.lc, temperature=-0.5)
@@ -100,6 +98,10 @@ class TestConfigFilename:
         result = config_filename(Model.LLaDA, Dataset.triviaqa, 128, 64, Remasking.lc)
         assert result == "LLaDA_triviaqa_l128_s64_lc.json"
 
+    def test_with_block_size(self):
+        result = config_filename(Model.LLaDA, Dataset.triviaqa, 128, 64, Remasking.lc, block_size=32)
+        assert result == "LLaDA_triviaqa_l128_s64_lc_b32.json"
+
 
 class TestBuildGenerationConfig:
     def test_basic_structure(self):
@@ -107,14 +109,26 @@ class TestBuildGenerationConfig:
             Model.LLaDA, Dataset.triviaqa, 128, 64, Remasking.lc,
         )
         assert config["model_id"] == MODEL_HF_IDS[Model.LLaDA]
-        assert config["model_backend"] == "llada"
         assert config["dataset"] == "triviaqa"
-        assert config["gen_length"] == 128
+        assert config["max_gen_length"] == 128
         assert config["steps"] == 64
         assert config["remasking"] == "lc"
         assert config["num_questions"] == 1000
         assert config["temperature"] == 1.0
         assert config["generate_greedy"] is True
+
+    def test_block_size_from_dataset(self):
+        config = build_generation_config(Model.LLaDA, Dataset.triviaqa)
+        ds_config = DATASET_CONFIGS[Dataset.triviaqa]
+        assert config["block_size"] == ds_config.block_size
+
+    def test_block_size_explicit(self):
+        config = build_generation_config(Model.LLaDA, Dataset.triviaqa, block_size=32)
+        assert config["block_size"] == 32
+
+    def test_block_size_none_overrides_dataset(self):
+        config = build_generation_config(Model.LLaDA, Dataset.triviaqa, block_size=None)
+        assert config["block_size"] is None
 
     def test_generate_greedy_false(self):
         config = build_generation_config(
@@ -135,10 +149,21 @@ class TestBuildGenerationConfig:
         config = build_generation_config(
             Model.LLaDA, Dataset.gsm8k, 128, 64, Remasking.lc,
         )
-        defaults = DATASET_DEFAULTS[Dataset.gsm8k]
-        assert config["dataset_config_name"] == defaults.config_name
-        assert config["split"] == defaults.split
-        assert config["batch_size"] == defaults.batch_size
+        ds_config = DATASET_CONFIGS[Dataset.gsm8k]
+        assert config["dataset_config_name"] == ds_config.config_name
+        assert config["split"] == ds_config.split
+        assert config["batch_size"] == ds_config.batch_size
+
+    def test_per_dataset_gen_length_steps(self):
+        config = build_generation_config(Model.LLaDA, Dataset.gsm8k)
+        ds_config = DATASET_CONFIGS[Dataset.gsm8k]
+        assert config["max_gen_length"] == ds_config.max_gen_length
+        assert config["steps"] == ds_config.steps
+
+    def test_explicit_length_overrides_dataset_default(self):
+        config = build_generation_config(Model.LLaDA, Dataset.gsm8k, 64, 32)
+        assert config["max_gen_length"] == 64
+        assert config["steps"] == 32
 
 
 class TestSaveLoadConfig:

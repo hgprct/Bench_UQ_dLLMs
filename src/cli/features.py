@@ -10,7 +10,7 @@ from src.seed import seed_everything
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build light UQ features from a generation run.")
-    parser.add_argument("--input_logs", required=True, help="Run directory with examples.jsonl + traces.npz")
+    parser.add_argument("--input_logs", required=True, help="Run directory with answers.jsonl + topk_logprobs.npz")
     parser.add_argument("--output", required=True, help="Output path for uq_features.jsonl")
     parser.add_argument("--nli_model", default="microsoft/deberta-v2-xlarge-mnli")
     parser.add_argument("--nli_batch_size", type=int, default=32)
@@ -30,7 +30,7 @@ def main(argv: list[str] | None = None) -> None:
     from src.utils.io import read_jsonl, write_jsonl
 
     run_dir = Path(args.input_logs)
-    records = read_jsonl(run_dir / "examples.jsonl")
+    records = read_jsonl(run_dir / "answers.jsonl")
     excluded = unlabeled_prompt_ids(records)
     if excluded:
         print(f"[features] Excluding {len(excluded)} prompt(s) with ambiguous labels")

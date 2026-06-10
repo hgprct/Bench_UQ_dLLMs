@@ -1,29 +1,27 @@
 # uncertainty-DLM
 
-Uncertainty quantification pipeline for discrete diffusion language models (LLaDA, LLaDA1.5, Dream). The pipeline generates text with masked-diffusion denoising, captures per-step traces, labels correctness, computes uncertainty quantification (UQ) features, and evaluates their discriminative power with AUROC, AUPRC, PRR, and other metrics. A separate K-fold cross-validation pipeline compares learned step selection against baselines, and a standalone latency profiler measures per-feature wall-clock overhead for Pareto-curve comparisons.
+Uncertainty quantification pipeline for discrete diffusion language models. The pipeline generates text with masked-diffusion denoising (with optional block-diffusion), labels correctness, computes uncertainty quantification (UQ) features, and evaluates their discriminative power with AUROC, AUPRC, PRR, and other metrics. A separate K-fold cross-validation pipeline compares learned step selection against baselines.
 
 ## Project structure
 
 ```
 src/
-  config.py              Enums, HF IDs, config builder
+  config.py              Enums, per-dataset defaults, config builder
   registry.py            Dataset module registry
   seed.py                Global RNG seeding
   split.py               Train/val/test + K-fold splitting
   kfold.py               K-fold aggregation (mean/std across folds)
-  generate/              Denoising loop, model loading, trace serialization
-  datasets/              Dataset adapters (triviaqa, gsm8k, wmt14_fr_en, wmt14_de_en, xsum, samsum)
+  generate/              Denoising loop, model loading, trace serialization, batch size calibration
+  datasets/              Dataset adapters (triviaqa, gsm8k, wmt14_fr_en, xsum, samsum, hotpotqa, musique)
   features/              UQ feature computation (token-level + NLI-based)
   evaluate/              Metrics (AUROC, AUPRC, PRR, ECE, Brier) + bootstrap CI
   semantic/              NLI entailment model (DeBERTa-v2-xlarge-mnli)
   judge/                 LLM judge for correctness labeling (vLLM backend)
-  mmd/                   MMD infrastructure (embeddings, kernels, scopes)
-  selection/             QP-learned temporal step selection
-  timing/                Latency profiler (per-feature wall-clock overhead)
-  io/                    JSON/JSONL I/O + XLSX workbook export
+  labeling/              Labeling dispatch (exact_match or llm_judge)
+  utils/                 JSON/JSONL I/O + XLSX workbook export
   cli/                   CLI entry points for each stage
-configs/                 JSON config files (<Model>_<dataset>_l<length>_s<steps>_<remasking>.json)
-scripts/                 Slurm job scripts and shell helpers
+configs/                 JSON config files (<Model>_<dataset>_l<max_gen_length>_s<steps>_<remasking>.json)
+scripts/                 SLURM job scripts and shell helpers
 tests/                   Pytest test suite
 ```
 
@@ -31,13 +29,45 @@ tests/                   Pytest test suite
 
 No aliases. Use exactly these names everywhere:
 
-- **Models**: `LLaDA`, `LLaDA1.5`, `Dream`
-- **Datasets**: `triviaqa`, `gsm8k`, `wmt14_fr_en`, `wmt14_de_en`, `xsum`, `samsum`
+- **Models**: `LLaDA`, `LLaDA1.5`
+- **Datasets**: `triviaqa`, `gsm8k`, `wmt14_fr_en`, `xsum`, `samsum`, `hotpotqa`, `musique`
 - **Remasking**: `lc` (low confidence), `rd` (random)
 
-## Pipelines
+## Per-dataset defaults
 
-The project ships three independent pipelines on top of a shared `generate -> label` foundation.
+Each dataset has its own generation defaults defined in `DATASET_CONFIGS` (`src/config.py`):
+
+| Dataset       | max_gen_length | steps | block_size | fewshot_k |
+|---------------|---------------|-------|------------|-----------|
+| triviaqa      | 128           | 128   | None       | 0         |
+| gsm8k         | 256           | 128   | None       | 4         |
+| wmt14_fr_en   | 128           | 128   | None       | 0         |
+| xsum          | 128           | 128   | None       | 0         |
+| samsum        | 128           | 128   | None       | 0         |
+| hotpotqa      | 128           | 128   | None       | 0         |
+| musique       | 128           | 128   | None       | 0         |
+
+These defaults are used by `build_generation_config()` and `gen_configs` when no explicit override is given.
+
+## Generation
+
+Generation uses a masked-diffusion denoising loop with support for block-diffusion (semi-autoregressive generation where `max_gen_length` is split into blocks of `block_size`). When `block_size` is `None`, the full generation length is denoised in a single pass.
+
+Default generation produces 1 greedy + 20 stochastic (T=1.0) answers per prompt.
+
+### Adaptive batch size
+
+When `--auto_batch_size` is enabled (the default), the generation CLI runs a binary search with real forward passes to find the largest batch size that fits in GPU memory, then applies a 0.9 safety factor. Explicitly passing `--batch_size N` disables auto-calibration.
+
+### Prompt preparation
+
+Prompts can be pre-built on a CPU node and saved as `prompts.jsonl` files, so the GPU generation job skips dataset loading:
+
+```bash
+python scripts/prepare_all_prompts.py --output-dir outputs configs/*.json
+```
+
+## Pipelines
 
 ### 1. Performance evaluation (AUROC/PRR)
 
@@ -45,55 +75,65 @@ The project ships three independent pipelines on top of a shared `generate -> la
 generate -> label -> split -> features -> evaluate -> export
 ```
 
-| Stage | CLI module | GPU | Description |
-|-------|-----------|-----|-------------|
-| generate | `src.cli.generate` | yes | Denoising loop + trace capture |
-| label | `src.cli.label` | varies | Label greedy answers correct/incorrect |
-| split | `src.cli.split` | no | Train/val/test split (default 10/30/40) |
-| features | `src.cli.features` | yes | Compute UQ features (msp, perplexity, mte, mcnse, semantic entropy, etc.) |
-| evaluate | `src.cli.evaluate` | no | AUROC/AUPRC/PRR/ECE/Brier with bootstrap CI |
-| export | `src.cli.export` | no | XLSX workbook export |
+| Stage    | CLI module         | GPU   | Description                                           |
+|----------|--------------------|-------|-------------------------------------------------------|
+| generate | `src.cli.generate` | yes   | Denoising loop + top-k logprob extraction             |
+| label    | `src.cli.label`    | varies| Label greedy answers correct/incorrect                |
+| split    | `src.cli.split`    | no    | Train/val/test split (default 10/30/40)               |
+| features | `src.cli.features` | yes   | Compute UQ features (msp, perplexity, mte, mcnse, semantic entropy, etc.) |
+| evaluate | `src.cli.evaluate` | no    | AUROC/AUPRC/PRR/ECE/Brier with bootstrap CI           |
+| export   | `src.cli.export`   | no    | XLSX workbook export                                  |
 
 ### 2. K-fold cross-validation (step selection vs baseline)
 
-After generation + labeling, three independent phases:
+After generation + labeling:
 
 ```
 baseline -> kfold -> report
 ```
 
-| Stage | CLI module | GPU | Description |
-|-------|-----------|-----|-------------|
-| baseline | `src.cli.baseline` | yes | Compute token + iid-sample + full-trajectory features for **all** prompts |
-| kfold | `src.cli.kfold` | yes | K folds, per fold: grid-search QP weights on train+val, evaluate baseline + selection on test |
-| report | `src.cli.report` | no | XLSX workbook + bar chart plots (baseline vs selection with error bars) |
-
-### 3. Latency profiler (per-feature wall-clock overhead)
-
-Standalone, fully independent of pipelines 1 and 2. Reuses the existing generation and NLI code.
-
-| CLI module | GPU | Description |
-|-----------|-----|-------------|
-| `src.cli.profile_latency` | yes | Per-feature wall-clock latency on N fresh prompts (default 50). Outputs CSV summary + raw JSONL + metadata |
+| Stage    | CLI module         | GPU | Description                                                              |
+|----------|--------------------|-----|--------------------------------------------------------------------------|
+| baseline | `src.cli.baseline` | yes | Compute token + iid-sample + full-trajectory features for all prompts    |
+| kfold    | `src.cli.kfold`    | yes | K folds: grid-search QP weights on train+val, evaluate on test           |
+| report   | `src.cli.report`   | no  | XLSX workbook + bar chart plots (baseline vs selection with error bars)   |
 
 ### Common helpers
 
-- `src.cli.select {train,evaluate,grid_search}` — standalone QP step-selection commands
-- `src.cli.gen_configs` — generate config files programmatically
-- `src.cli.pipeline` — orchestrate Pipeline 1 stages in sequence
+- `src.cli.gen_configs` -- generate config files programmatically
+- `src.cli.pipeline` -- orchestrate Pipeline 1 stages in sequence
+- `src.cli.label_all` -- batch-label all run directories
+- `src.cli.build_prompts` -- build and save prompts for a config
 
 ## Running on DALIA (HPC)
 
-All Python execution goes through Slurm + Apptainer. **Never run Python directly on the login node.**
+All Python execution goes through SLURM + Apptainer. **Never run Python directly on the login node.**
 
 ### Environment setup
 
-`scripts/slurm_env.sh` provides three shell functions used by all Slurm scripts:
+`scripts/slurm_env.sh` provides three shell functions used by all SLURM scripts:
 - `init_uq_slurm_env` -- sets `$IMAGE`, `$PROJECT_DIR`, creates log dirs
 - `print_uq_header` -- prints job metadata
 - `run_in_uq_container {gpu|cpu} <command>` -- runs a command inside the Apptainer container
 
-A `.env` file at the project root (see `.env.example`) provides `HF_TOKEN`, `STAGE_DIR_PATH`, `PROJECT_PATH`, etc. It is automatically sourced by each Slurm script.
+A `.env` file at the project root (see `.env.example`) provides `HF_TOKEN`, `STAGE_DIR_PATH`, `PROJECT_PATH`, etc. It is automatically sourced by each SLURM script.
+
+### Full generation across all datasets
+
+The three-phase launch script handles config generation, prompt building, and SLURM array submission:
+
+```bash
+bash scripts/launch_llada15_gen.sh [options]
+```
+
+Options:
+- `--concurrency N` -- max simultaneous SLURM tasks (default: 6)
+- `--output-dir DIR` -- parent output directory (default: outputs)
+- `--dry-run` -- print commands without submitting
+- `--prompts-only` -- only build prompts, don't submit generation jobs
+- `--num-questions N` -- override number of questions per dataset (default: 1000)
+
+Phase 1 generates config JSONs using per-dataset defaults. Phase 2 builds `prompts.jsonl` files inside the container (CPU). Phase 3 submits a SLURM array job (`scripts/generate_array.slurm`) for GPU generation.
 
 ### Pipeline 1: full performance pipeline
 
@@ -111,26 +151,21 @@ Environment overrides (set before sbatch or export):
 NUM_QUESTIONS=500 TEMPERATURE=0.8 BATCH_SIZE=8 SEED=42 \
 LABEL_METHOD=exact_match JUDGE_MODEL=meta-llama/Llama-3.3-70B-Instruct \
 NLI_MODEL=microsoft/deberta-v2-xlarge-mnli BOOTSTRAP_SAMPLES=1000 \
-  sbatch scripts/pipeline_v2.slurm LLaDA gsm8k 20 128 64 rd
-```
-
-Sweep all configs in `configs/`:
-```bash
-bash scripts/run_all_configs_v2.sh 20
+  sbatch scripts/pipeline_v2.slurm LLaDA gsm8k 20 256 128 rd
 ```
 
 ### Pipeline 1: individual stages
 
 ```bash
-sbatch scripts/generate_v2.slurm --config configs/LLaDA_triviaqa_l128_s64_lc.json
-sbatch scripts/label_v2.slurm outputs/LLaDA_triviaqa_l128_s64_lc/
-sbatch scripts/features_v2.slurm --input_logs outputs/LLaDA_triviaqa_l128_s64_lc/ \
-  --output outputs/LLaDA_triviaqa_l128_s64_lc/uq_features.jsonl
-sbatch scripts/evaluate_v2.slurm --features_path outputs/LLaDA_triviaqa_l128_s64_lc/uq_features.jsonl \
-  --output_metrics_json outputs/LLaDA_triviaqa_l128_s64_lc/uq_eval_metrics.json
+sbatch scripts/generate_v2.slurm --config configs/LLaDA1.5_triviaqa_l128_s128_lc.json
+sbatch scripts/label_v2.slurm outputs/LLaDA1.5_triviaqa_l128_s128_lc/
+sbatch scripts/features_v2.slurm --input_logs outputs/LLaDA1.5_triviaqa_l128_s128_lc/ \
+  --output outputs/LLaDA1.5_triviaqa_l128_s128_lc/uq_features.jsonl
+sbatch scripts/evaluate_v2.slurm --features_path outputs/LLaDA1.5_triviaqa_l128_s128_lc/uq_features.jsonl \
+  --output_metrics_json outputs/LLaDA1.5_triviaqa_l128_s128_lc/uq_eval_metrics.json
 ```
 
-Run a subset via the Python orchestrator:
+Run via the Python orchestrator:
 ```bash
 python -m src.cli.pipeline --model LLaDA --dataset triviaqa \
   --length 128 --steps 64 --remasking lc --stages generate label
@@ -138,124 +173,96 @@ python -m src.cli.pipeline --model LLaDA --dataset triviaqa \
 
 ### Pipeline 2: K-fold cross-validation
 
-**Phase 1 — baseline features (one job per run dir):**
+**Phase 1 -- baseline features:**
 ```bash
-sbatch scripts/baseline_v2.slurm outputs/LLaDA_triviaqa_l128_s64_lc
-```
-Output: `<run_dir>/baseline_features.jsonl`.
-
-**Phase 2 — K folds with per-fold grid search:**
-```bash
-sbatch scripts/kfold_v2.slurm outputs/LLaDA_triviaqa_l128_s64_lc 10 \
-  outputs/LLaDA_triviaqa_l128_s64_lc/baseline_features.jsonl
-```
-Args: `<run_dir> <n_train> <baseline_features_path>`. Outputs to `<run_dir>/kfold/`: per-fold dirs, `kfold_summary.json`, `kfold_summary.csv`.
-
-Direct CLI form (full control):
-```bash
-python -m src.cli.kfold \
-  --run_dir outputs/LLaDA_triviaqa_l128_s64_lc \
-  --baseline_features_path outputs/LLaDA_triviaqa_l128_s64_lc/baseline_features.jsonl \
-  --n_train 10 --n_folds 5 --seed 42 \
-  --lambda_values 0.001 0.01 0.1 1.0 10.0 --budget_k 8
+sbatch scripts/baseline_v2.slurm outputs/LLaDA1.5_triviaqa_l128_s128_lc
 ```
 
-**Phase 3 — XLSX + bar chart report:**
+**Phase 2 -- K folds with per-fold grid search:**
 ```bash
-OUTPUTS_ROOT=outputs/LLaDA_triviaqa_l128_s64_lc \
-OUTPUT_DIR=outputs/LLaDA_triviaqa_l128_s64_lc/kfold/report \
+sbatch scripts/kfold_v2.slurm outputs/LLaDA1.5_triviaqa_l128_s128_lc 10 \
+  outputs/LLaDA1.5_triviaqa_l128_s128_lc/baseline_features.jsonl
+```
+
+**Phase 3 -- XLSX + bar chart report:**
+```bash
+OUTPUTS_ROOT=outputs/LLaDA1.5_triviaqa_l128_s128_lc \
+OUTPUT_DIR=outputs/LLaDA1.5_triviaqa_l128_s128_lc/kfold/report \
   sbatch scripts/report_v2.slurm
-```
-Outputs to `<kfold_dir>/report/`: `kfold_results.xlsx`, `kfold_<metric>.pdf`.
-
-### Pipeline 3: latency profiler
-
-```bash
-python -m src.cli.profile_latency \
-  --config configs/LLaDA_triviaqa_l128_s64_lc.json \
-  --output_dir outputs/LLaDA_triviaqa_l128_s64_lc/latency \
-  --num_prompts 50 --warmup_prompts 2 \
-  --selection_dir outputs/selection/LLaDA_triviaqa_l128_s64_lc \
-  --budget_k 8 \
-  --seed 42
-```
-
-The profiler generates fresh prompts from the HF dataset (no dependency on any prior run for prompt selection), times every UQ feature per prompt under the standalone-cost attribution model, then averages across prompts.
-
-Outputs to `--output_dir`:
-- `latency_summary.csv` — one row per `(run_id, family, feature)` with `time_{gen,nli,math,total}_{mean,std}`.
-- `latency_raw.jsonl` — per-`(prompt, feature)` measurements for re-aggregation or CI plots.
-- `latency_metadata.json` — config snapshot, autodetected NLI batch size, greedy/extras generation baselines.
-
-If `--selection_dir` points at a directory without `trained_weights.npz`, `selected-*` features are skipped (warning logged).
-
-### Step selection (standalone)
-
-```bash
-# Train weights
-python -m src.cli.select train --run_dir outputs/LLaDA_triviaqa_l128_s64_lc/ \
-  --output_dir outputs/selection/ --n_train 10 --n_val 30 --n_test 40
-
-# Evaluate with learned weights
-python -m src.cli.select evaluate --run_dir outputs/LLaDA_triviaqa_l128_s64_lc/ \
-  --weights_dir outputs/selection/ --discretization_method top_k
-
-# Lambda grid search
-python -m src.cli.select grid_search --run_dir outputs/LLaDA_triviaqa_l128_s64_lc/ \
-  --output_dir outputs/grid/ --lambda_values 0.01 0.1 1.0 10.0 \
-  --n_train 10 --n_val 30 --n_test 40
 ```
 
 ### Generate config files
 
 ```bash
-python -m src.cli.gen_configs --model LLaDA Dream --dataset triviaqa gsm8k \
-  --length 128 --remasking lc rd
+# Uses per-dataset max_gen_length/steps/fewshot_k from DATASET_CONFIGS
+python -m src.cli.gen_configs --model LLaDA1.5 --dataset triviaqa gsm8k \
+  --remasking lc rd
+
+# Explicit overrides
+python -m src.cli.gen_configs --model LLaDA1.5 --dataset triviaqa \
+  --max-gen-length 64 --steps 64 --block-size 32 --remasking lc
 ```
 
-### Relabel all runs
+### Preflight checks
 
 ```bash
-bash scripts/relabel_all.sh
+bash scripts/preflight.sh          # import check + GPU benchmark
+bash scripts/preflight.sh imports  # import check only
+bash scripts/preflight.sh submit   # submit to all cluster nodes
+bash scripts/preflight.sh report   # print GPU benchmark report
 ```
 
 ### Tests
 
 ```bash
 sbatch scripts/tests_v2.slurm
-TEST_TARGET="tests/test_timing/" sbatch scripts/tests_v2.slurm
+TEST_TARGET="tests/test_config.py" sbatch scripts/tests_v2.slurm
 PYTEST_ARGS="-q -x" sbatch scripts/tests_v2.slurm
 ```
 
-### Build the Apptainer container
+## Config files
 
-```bash
-sbatch build_container.slurm
+Config JSON files follow the naming convention `<Model>_<dataset>_l<max_gen_length>_s<steps>_<remasking>[_b<block_size>][_fs<fewshot_k>].json`.
+
+Example (`configs/LLaDA1.5_gsm8k_l256_s128_lc_fs4.json`):
+```json
+{
+  "model_family": "DLM",
+  "model_id": "GSAI-ML/LLaDA-1.5",
+  "dataset": "gsm8k",
+  "max_gen_length": 256,
+  "steps": 128,
+  "block_size": null,
+  "remasking": "lc",
+  "temperature": 1.0,
+  "num_response_samples": 20,
+  "generate_greedy": true,
+  "fewshot_k": 4,
+  "num_questions": 1000
+}
 ```
 
 ## Outputs
 
 Each run writes to `outputs/<run_id>/`:
 
-| File | Pipeline | Content |
-|------|----------|---------|
-| `config.json` | gen | Resolved generation config |
-| `examples.jsonl` | gen + label | One record per QA sample with per-step trace strings; `final.is_correct` after labeling |
-| `answers.jsonl` | gen | Prompt/question/answer triplets |
-| `traces.npz` | gen | Dense tensor arrays (token IDs, logprobs, mask status, top-k) |
-| `metadata.json` | gen | Run manifest and file index |
+| File | Stage | Content |
+|------|-------|---------|
+| `config.json` | generate | Resolved generation config |
+| `examples.jsonl` | generate + label | One record per QA sample; `final.is_correct` after labeling |
+| `answers.jsonl` | generate | Prompt/question/answer triplets |
+| `traces.npz` | generate | Dense tensor arrays (token IDs, logprobs, top-k) |
+| `metadata.json` | generate | Run manifest and file index |
+| `prompts.jsonl` | prepare | Pre-built prompts (optional, built in Phase 2 of launch script) |
 | `splits.json` | split | Train/val/test prompt ID split |
 | `uq_features.jsonl` | features | One row per prompt with all UQ features |
 | `uq_eval_metrics.{json,csv}` | evaluate | AUROC/AUPRC/PRR/ECE/Brier with bootstrap CI |
 | `uq_results.xlsx` | export | Formatted workbook with color-coded performance |
-| `baseline_features.jsonl` | baseline | All token + iid-sample + full-trajectory features for every prompt |
-| `kfold/kfold_summary.{json,csv}` | kfold | Mean/std of metrics across folds, per feature, baseline vs selection |
-| `kfold/fold_<i>/` | kfold | Per-fold grid-search weights, baseline + selection metrics |
+| `baseline_features.jsonl` | baseline | All token + iid-sample + full-trajectory features |
+| `kfold/kfold_summary.{json,csv}` | kfold | Mean/std of metrics across folds |
+| `kfold/fold_<i>/` | kfold | Per-fold grid-search weights + metrics |
 | `kfold/report/kfold_results.xlsx` | report | Comparison workbook |
-| `kfold/report/kfold_<metric>.pdf` | report | Bar chart with error bars (baseline vs selection) |
-| `latency/latency_summary.csv` | profile_latency | Per-feature wall-clock mean/std over the prompt sample |
-| `latency/latency_raw.jsonl` | profile_latency | Per-`(prompt, feature)` raw measurements |
-| `latency/latency_metadata.json` | profile_latency | Run-level diagnostics |
+| `kfold/report/kfold_<metric>.pdf` | report | Bar chart with error bars |
 
 ## Reproducibility
 
@@ -264,4 +271,3 @@ Each run writes to `outputs/<run_id>/`:
 - Two-pass generation: seed for greedy, seed+1 for sampled
 - Deterministic train/val/test split with configurable absolute counts
 - K-fold splits deterministic from `(seed, k, n_train)`
-- Latency profiler seeds the fresh HF prompt sample; per-prompt NLI cache is bypassed so each prompt pays its full N×N cost (no inter-prompt amortization)

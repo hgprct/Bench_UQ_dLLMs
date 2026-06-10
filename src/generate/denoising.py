@@ -1,13 +1,11 @@
-"""Pure diffusion denoising loop with per-model entry points.
+"""LLaDA diffusion generation with block-diffusion support.
+
+Based on the official LLaDA inference code (ML-GSAI/LLaDA).
+Supports semi-autoregressive generation via block_size < max_gen_length.
 
 Public API:
-  generate(model, prompts, device, *, backend, ...)
-  generate_llada(model, prompts, device, *, ...)
-  generate_dream(model, prompts, device, *, ...)
-  generate_nemotron(model, prompts, device, *, ...)
-
-All return (answers: list[str], rich_traces: dict[str, Tensor])
-with identical trace tensor shapes for downstream compatibility.
+  generate(model, prompts, device, *, tokenizer, ...) -> (answers, topk_logprobs)
+  calibrate_batch_size(model, tokenizer, device, ...) -> int
 """
 
 from __future__ import annotations
@@ -15,147 +13,83 @@ from __future__ import annotations
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 from tqdm import tqdm
 
 
-# ---------------------------------------------------------------------------
-# Shared utilities
-# ---------------------------------------------------------------------------
-
-def add_gumbel_noise(logits: torch.Tensor, temperature: float, *, _noise_buf: torch.Tensor | None = None) -> torch.Tensor:
+def add_gumbel_noise(logits: torch.Tensor, temperature: float) -> torch.Tensor:
     if temperature == 0:
         return logits
-    noisy_logits = logits.float()
-    if noisy_logits.data_ptr() == logits.data_ptr():
-        noisy_logits = noisy_logits.clone()
-    if _noise_buf is not None and _noise_buf.shape == noisy_logits.shape and _noise_buf.device == noisy_logits.device:
-        noise = _noise_buf
-    else:
-        noise = torch.empty_like(noisy_logits, dtype=torch.float32)
-    noise.uniform_()
-    tiny = torch.finfo(noise.dtype).tiny
-    noise.clamp_(min=tiny, max=1.0 - torch.finfo(noise.dtype).eps)
-    noise.log_().neg_().log_().neg_()
-    noisy_logits.add_(noise, alpha=float(temperature))
-    return noisy_logits
+    logits = logits.to(torch.float64)
+    noise = torch.rand_like(logits, dtype=torch.float64)
+    gumbel_noise = (-torch.log(noise)) ** temperature
+    return logits.exp() / gumbel_noise
 
 
-def _selected_token_probability(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Tensor:
-    selected_logits = torch.gather(logits, dim=-1, index=torch.unsqueeze(token_ids, -1)).squeeze(-1)
-    normalizer = torch.logsumexp(logits, dim=-1)
-    return torch.exp(selected_logits - normalizer)
+def get_num_transfer_tokens(
+    mask_index: torch.Tensor, steps: int
+) -> torch.Tensor:
+    mask_num = mask_index.sum(dim=1, keepdim=True)
+    base = mask_num // steps
+    remainder = mask_num % steps
+    num_transfer_tokens = base.expand(-1, steps).clone()
+    for i in range(mask_num.size(0)):
+        num_transfer_tokens[i, : remainder[i]] += 1
+    return num_transfer_tokens
 
 
-def _mask_undecodable_token_logits(logits: torch.Tensor, tokenizer: Any) -> torch.Tensor:
-    invalid_ids = _invalid_token_ids_for_tokenizer(tokenizer, logits.shape[-1])
-    if invalid_ids.numel() == 0:
-        return logits
-    cache = getattr(tokenizer, "_uq_invalid_device_cache", None)
-    if cache is None:
-        cache = {}
+def calibrate_batch_size(
+    model: Any,
+    tokenizer: Any,
+    device: Any,
+    *,
+    prompts: list[str],
+    max_gen_length: int,
+    mask_id: int,
+    max_batch_size: int = 64,
+    safety_factor: float = 0.9,
+) -> int:
+    """Find the largest batch size that fits in GPU memory via binary search.
+
+    Runs real forward passes at the worst-case (longest) prompt length to find
+    the maximum batch size, then applies *safety_factor* to leave headroom for
+    the denoising loop overhead (confidence tensors, Gumbel noise, etc.).
+    """
+    if not (torch.cuda.is_available() and str(device).startswith("cuda")):
+        return max_batch_size
+
+    encoded_lengths = [
+        len(tokenizer.encode(p, add_special_tokens=False)) for p in prompts
+    ]
+    max_prompt_len = max(encoded_lengths)
+    total_seq_len = max_prompt_len + max_gen_length
+
+    lo, hi, best = 1, max_batch_size, 1
+
+    while lo <= hi:
+        mid = (lo + hi) // 2
         try:
-            setattr(tokenizer, "_uq_invalid_device_cache", cache)
-        except Exception:
-            cache = {}
-    key = (int(logits.shape[-1]), str(logits.device))
-    device_ids = cache.get(key)
-    if device_ids is None:
-        device_ids = invalid_ids.to(logits.device)
-        cache[key] = device_ids
-    logits.index_fill_(dim=-1, index=device_ids, value=-torch.inf)
-    return logits
+            dummy = torch.full(
+                (mid, total_seq_len), mask_id, dtype=torch.long, device=device,
+            )
+            attn = torch.ones_like(dummy)
+            out = model(dummy, attention_mask=attn).logits
+            out_gen = out[:, max_prompt_len:, :].float()
+            _ = F.log_softmax(out_gen, dim=-1)
+            del dummy, attn, out, out_gen, _
+            torch.cuda.empty_cache()
+            best = mid
+            lo = mid + 1
+        except torch.cuda.OutOfMemoryError:
+            del dummy, attn
+            torch.cuda.empty_cache()
+            hi = mid - 1
 
+    calibrated = max(1, int(best * safety_factor))
+    print(f"[calibrate] max_prompt_len={max_prompt_len}  seq_len={total_seq_len}  "
+          f"raw_max_bs={best}  calibrated_bs={calibrated}")
+    return calibrated
 
-def _invalid_token_ids_for_tokenizer(tokenizer: Any, vocab_size: int) -> torch.Tensor:
-    if tokenizer is None or vocab_size is None:
-        return torch.empty(0, dtype=torch.long)
-    vocab_size = int(vocab_size)
-    cache = getattr(tokenizer, "_uq_invalid_ids_cache", None)
-    if cache is None:
-        cache = {}
-        try:
-            setattr(tokenizer, "_uq_invalid_ids_cache", cache)
-        except Exception:
-            cache = {}
-    if vocab_size in cache:
-        return cache[vocab_size]
-
-    valid_ids = set()
-    has_source = False
-    get_vocab = getattr(tokenizer, "get_vocab", None)
-    if callable(get_vocab):
-        try:
-            vocab = get_vocab()
-            has_source = True
-            valid_ids.update(int(tid) for tid in vocab.values() if tid is not None and 0 <= int(tid) < vocab_size)
-        except Exception:
-            valid_ids.clear()
-            has_source = False
-
-    if not has_source:
-        decoder = getattr(tokenizer, "decoder", None)
-        if isinstance(decoder, dict):
-            has_source = True
-            valid_ids.update(int(tid) for tid, tok in decoder.items() if tok is not None and 0 <= int(tid) < vocab_size)
-
-    if not has_source or not valid_ids:
-        invalid = torch.empty(0, dtype=torch.long)
-    else:
-        invalid = torch.tensor([tid for tid in range(vocab_size) if tid not in valid_ids], dtype=torch.long)
-    cache[vocab_size] = invalid
-    return invalid
-
-
-def _non_special_token_counts(tokenizer: Any, token_ids: torch.Tensor, extra_special_ids: tuple = ()) -> torch.Tensor:
-    special_ids = set(getattr(tokenizer, "all_special_ids", []) or [])
-    pid = getattr(tokenizer, "pad_token_id", None)
-    if pid is not None:
-        special_ids.add(int(pid))
-    for tid in extra_special_ids or ():
-        if tid is not None:
-            special_ids.add(int(tid))
-    ids = torch.as_tensor(token_ids, dtype=torch.long)
-    special_mask = torch.zeros_like(ids, dtype=torch.bool)
-    for tid in special_ids:
-        special_mask |= ids == int(tid)
-    return (~special_mask).sum(dim=-1).detach().to(torch.int32).cpu()
-
-
-def _merge_trace_batches(trace_batches: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
-    if not trace_batches:
-        return {}
-    expected = set(trace_batches[0])
-    for i, batch in enumerate(trace_batches[1:], start=1):
-        if set(batch) != expected:
-            raise ValueError(f"Trace batch {i} has inconsistent keys")
-    return {key: torch.cat([b[key] for b in trace_batches], dim=0) for key in sorted(expected)}
-
-
-# ---------------------------------------------------------------------------
-# Backend registry
-# ---------------------------------------------------------------------------
-
-_BACKENDS: dict[str, dict[str, Any]] | None = None
-
-
-def _get_backend_config(backend: str) -> dict[str, Any]:
-    from src.generate._forward import llada_logits, dream_logits
-
-    global _BACKENDS
-    if _BACKENDS is None:
-        _BACKENDS = {
-            "llada": dict(get_logits=llada_logits),
-            "dream": dict(get_logits=dream_logits),
-        }
-    cfg = _BACKENDS.get(backend)
-    if cfg is None:
-        raise ValueError(f"Unknown backend: {backend!r}. Valid: {sorted(_BACKENDS)}")
-    return cfg
-
-
-# ---------------------------------------------------------------------------
-# Pure diffusion denoising loop + per-model entry points
-# ---------------------------------------------------------------------------
 
 @torch.no_grad()
 def generate(
@@ -163,363 +97,188 @@ def generate(
     prompts: list[str],
     device: Any,
     *,
-    backend: str = "llada",
-    batch_size: int = 8,
-    tokenizer: Any = None,
+    tokenizer: Any,
     steps: int = 128,
-    gen_length: int = 128,
+    max_gen_length: int = 128,
+    block_size: int | None = None,
     temperature: float = 0.0,
+    cfg_scale: float = 0.0,
     remasking: str = "low_confidence",
     mask_id: int = 126336,
     eos_token_ids: list[int] | tuple[int, ...] | None = None,
     logits_eos_inf: bool = False,
     confidence_eos_eot_inf: bool = False,
-    save_trajectory: bool = True,
-    k_topk_logits: int = 64,
-    save_token_logprobs: bool = True,
+    batch_size: int = 8,
+    top_k: int = 64,
 ) -> tuple[list[str], dict[str, torch.Tensor]]:
-    if backend == "nemotron":
-        return generate_nemotron(
-            model, prompts, device,
-            batch_size=batch_size, tokenizer=tokenizer, steps=steps,
-            gen_length=gen_length, temperature=temperature,
-            remasking=remasking, mask_id=mask_id,
-            eos_token_ids=eos_token_ids, logits_eos_inf=logits_eos_inf,
-            confidence_eos_eot_inf=confidence_eos_eot_inf,
-            save_trajectory=save_trajectory, k_topk_logits=k_topk_logits,
-            save_token_logprobs=save_token_logprobs,
-        )
+    """Generate answers for a list of prompts using LLaDA diffusion.
 
-    cfg = _get_backend_config(backend)
-    get_logits = cfg["get_logits"]
+    Returns
+    -------
+    answers : list[str]
+        Decoded text answers, one per prompt.
+    topk_data : dict[str, Tensor]
+        "topk_logprobs": (N, max_gen_length, K) float32
+        "topk_token_ids": (N, max_gen_length, K) int32
+    """
+    if block_size is None:
+        block_size = max_gen_length
 
-    if "setup_fn" in cfg:
-        cfg["setup_fn"](model)
+    assert max_gen_length % block_size == 0, (
+        f"max_gen_length ({max_gen_length}) must be divisible by block_size ({block_size})"
+    )
 
-    generated_answers: list[str] = []
-    trace_batches: list[dict[str, torch.Tensor]] = []
-    save_topk = save_trajectory and k_topk_logits is not None
-    noise_buf = None
+    all_answers: list[str] = []
+    topk_logprobs_batches: list[torch.Tensor] = []
+    topk_ids_batches: list[torch.Tensor] = []
+    is_cuda = torch.cuda.is_available() and str(device).startswith("cuda")
 
     for batch_start in tqdm(
         range(0, len(prompts), batch_size),
         total=(len(prompts) + batch_size - 1) // batch_size,
-        desc="Generating batches",
+        desc="Generating",
     ):
-        prompt_batch = prompts[batch_start:batch_start + batch_size]
-        encoded = tokenizer(prompt_batch, add_special_tokens=False, padding=True, return_tensors="pt")
+        prompt_batch = prompts[batch_start : batch_start + batch_size]
+        encoded = tokenizer(
+            prompt_batch,
+            add_special_tokens=False,
+            padding=True,
+            return_tensors="pt",
+        )
         input_ids = encoded["input_ids"].to(device)
         attention_mask = encoded["attention_mask"].to(device)
+        prompt_len = input_ids.shape[1]
+        del encoded
 
-        x = torch.full((input_ids.shape[0], input_ids.shape[1] + gen_length), mask_id, dtype=torch.long, device=model.device)
-        x[:, :input_ids.shape[1]] = input_ids.clone()
+        x = torch.full(
+            (input_ids.shape[0], prompt_len + max_gen_length),
+            mask_id,
+            dtype=torch.long,
+            device=device,
+        )
+        x[:, :prompt_len] = input_ids
+        del input_ids
+
         full_attention_mask = torch.cat(
-            [attention_mask, torch.ones((input_ids.shape[0], gen_length), dtype=attention_mask.dtype, device=model.device)],
+            [
+                attention_mask,
+                torch.ones(
+                    (x.shape[0], max_gen_length),
+                    dtype=attention_mask.dtype,
+                    device=device,
+                ),
+            ],
             dim=-1,
         )
-        response_slice = slice(input_ids.shape[1], input_ids.shape[1] + gen_length)
+        del attention_mask
 
-        if save_trajectory:
-            intermediate_x0_pred = []
-            response_token_steps = []
-            mask_status_steps = []
-            newly_unmasked_steps = []
-            remasked_steps = []
-            x_gen_count_steps = []
-            x0_gen_count_steps = []
-            if save_token_logprobs:
-                x0_logprobs_steps = []
-            previous_mask = torch.ones((input_ids.shape[0], gen_length), dtype=torch.bool, device=model.device)
-        if save_topk:
-            topk_logits_steps = []
-            topk_ids_steps = []
+        prompt_index = x != mask_id
 
-        num_unmasked_per_step = max(1, (gen_length + steps - 1) // steps)
+        num_blocks = max_gen_length // block_size
+        steps_per_block = steps // num_blocks
 
-        for step_i in range(steps):
-            response_state = x[:, response_slice]
-            response_mask_index = response_state == mask_id
+        for num_block in range(num_blocks):
+            block_start_pos = prompt_len + num_block * block_size
+            block_end = prompt_len + (num_block + 1) * block_size
+            block_mask_index = x[:, block_start_pos:block_end] == mask_id
+            num_transfer_tokens = get_num_transfer_tokens(
+                block_mask_index, steps_per_block
+            )
 
-            full_logits = get_logits(model, x, full_attention_mask)
-            response_logits = full_logits[:, response_slice, :].contiguous()
-            del full_logits
+            for step_i in range(steps_per_block):
+                mask_index = x == mask_id
 
-            if logits_eos_inf and eos_token_ids:
-                for _eos_id in eos_token_ids:
-                    if 0 <= _eos_id < response_logits.shape[-1]:
-                        response_logits[:, :, _eos_id] = -torch.inf
-            response_logits = response_logits.float()
-            response_logits = _mask_undecodable_token_logits(response_logits, tokenizer)
+                if cfg_scale > 0.0:
+                    un_x = x.clone()
+                    un_x[prompt_index] = mask_id
+                    x_ = torch.cat([x, un_x], dim=0)
+                    attn_ = torch.cat(
+                        [full_attention_mask, full_attention_mask], dim=0
+                    )
+                    logits = model(x_, attention_mask=attn_).logits
+                    del x_, attn_, un_x
+                    logits, un_logits = torch.chunk(logits, 2, dim=0)
+                    logits = un_logits + (cfg_scale + 1) * (logits - un_logits)
+                    del un_logits
+                else:
+                    logits = model(x, attention_mask=full_attention_mask).logits
 
-            if save_topk and step_i == steps - 1:
-                tk_logits, tk_ids = torch.topk(response_logits, k=min(int(k_topk_logits), response_logits.shape[-1]), dim=-1)
-                topk_logits_steps.append(tk_logits.detach().to(torch.float16).cpu())
-                topk_ids_steps.append(tk_ids.detach().to(torch.int32).cpu())
-                del tk_logits, tk_ids
+                if logits_eos_inf and eos_token_ids:
+                    for eos_id in eos_token_ids:
+                        if 0 <= eos_id < logits.shape[-1]:
+                            logits[:, :, eos_id] = -torch.inf
 
-            if temperature > 0 and (noise_buf is None or noise_buf.shape != response_logits.shape):
-                noise_buf = torch.empty(response_logits.shape, dtype=torch.float32, device=response_logits.device)
-            logits_noisy = add_gumbel_noise(response_logits, temperature=temperature, _noise_buf=noise_buf)
-            x0_response = torch.argmax(logits_noisy, dim=-1)
-            del logits_noisy
+                logits_with_noise = add_gumbel_noise(logits, temperature)
+                x0 = torch.argmax(logits_with_noise, dim=-1)
+                del logits_with_noise
 
-            if save_trajectory:
-                x0_greedy = torch.argmax(response_logits, dim=-1)
-                x0_obs_ids = torch.where(response_mask_index, x0_greedy, response_state)
-                if save_token_logprobs:
-                    sel = torch.gather(response_logits, dim=-1, index=x0_obs_ids.unsqueeze(-1)).squeeze(-1)
-                    norm = torch.logsumexp(response_logits, dim=-1)
-                    x0_logprobs_steps.append((sel - norm).detach().to(torch.float32).cpu())
-                intermediate_x0_pred.append(x0_obs_ids.detach().to(torch.int32).cpu())
-                x0_gen_count_steps.append(_non_special_token_counts(tokenizer, x0_obs_ids, extra_special_ids=(mask_id,)))
-                del x0_obs_ids, x0_greedy
+                if remasking == "low_confidence":
+                    if confidence_eos_eot_inf and eos_token_ids:
+                        for eos_id in eos_token_ids:
+                            if 0 <= eos_id < logits.shape[-1]:
+                                logits[:, :, eos_id] = -torch.inf
+                    p = F.softmax(logits.float(), dim=-1)
+                    del logits
+                    x0_p = torch.gather(
+                        p, dim=-1, index=x0.unsqueeze(-1)
+                    ).squeeze(-1)
+                    del p
+                elif remasking == "random":
+                    del logits
+                    x0_p = torch.rand(x0.shape, device=x0.device)
+                else:
+                    raise ValueError(f"Unsupported remasking: {remasking}")
 
-            if remasking == "low_confidence":
-                logits_conf = response_logits
-                if confidence_eos_eot_inf and eos_token_ids:
-                    logits_conf = response_logits.clone()
-                    for _eos_id in eos_token_ids:
-                        if 0 <= _eos_id < logits_conf.shape[-1]:
-                            logits_conf[:, :, _eos_id] = -torch.inf
-                x0_p = _selected_token_probability(logits_conf, x0_response)
-                if logits_conf is not response_logits:
-                    del logits_conf
-            elif remasking == "random":
-                x0_p = torch.rand(x0_response.shape, device=x0_response.device)
-            else:
-                raise ValueError(f"Unsupported remasking: {remasking}")
+                x0_p[:, block_end:] = -torch.inf
 
-            x0_response = torch.where(response_mask_index, x0_response, response_state)
-            confidence = torch.where(response_mask_index, x0_p, -torch.inf)
+                x0 = torch.where(mask_index, x0, x)
+                confidence = torch.where(mask_index, x0_p, -torch.inf)
+                del x0_p
 
-            transfer = torch.zeros_like(response_mask_index, dtype=torch.bool, device=x.device)
-            _, sel_idx = torch.topk(confidence, k=min(num_unmasked_per_step, confidence.shape[1]), largest=True, dim=-1)
-            transfer.scatter_(dim=-1, index=sel_idx, value=True)
-            transfer &= response_mask_index
-            response_state[transfer] = x0_response[transfer]
+                transfer_index = torch.zeros_like(x0, dtype=torch.bool)
+                for j in range(confidence.shape[0]):
+                    _, sel = torch.topk(
+                        confidence[j], k=int(num_transfer_tokens[j, step_i])
+                    )
+                    transfer_index[j, sel] = True
+                x[transfer_index] = x0[transfer_index]
+                del x0, confidence, transfer_index, mask_index
 
-            if save_trajectory:
-                cur_mask = response_state == mask_id
-                response_token_steps.append(response_state.detach().to(torch.int32).cpu())
-                mask_status_steps.append(cur_mask.detach().cpu())
-                newly_unmasked_steps.append((previous_mask & ~cur_mask).detach().cpu())
-                remasked_steps.append((~previous_mask & cur_mask).detach().cpu())
-                x_gen_count_steps.append(_non_special_token_counts(tokenizer, response_state, extra_special_ids=(mask_id,)))
-                previous_mask = cur_mask.clone()
+        del prompt_index
 
-            del response_logits, x0_response, x0_p, confidence, transfer
-
-        response_ids = x[:, response_slice]
-        generated_answers.extend(
-            ans.strip() for ans in tokenizer.batch_decode(response_ids, skip_special_tokens=True)
-        )
-
-        if save_trajectory:
-            mask_status = torch.stack(mask_status_steps, dim=1).to(torch.bool)
-            batch_trace = {
-                "response_token_ids": torch.stack(response_token_steps, dim=1).to(torch.int32),
-                "x0_pred_token_ids": torch.stack(intermediate_x0_pred, dim=1).to(torch.int32),
-                "mask_status": mask_status,
-                "unmasked_status": ~mask_status,
-                "newly_unmasked": torch.stack(newly_unmasked_steps, dim=1).to(torch.bool),
-                "remasked": torch.stack(remasked_steps, dim=1).to(torch.bool),
-                "x_generated_token_counts": torch.stack(x_gen_count_steps, dim=1).to(torch.int32),
-                "x0_generated_token_counts": torch.stack(x0_gen_count_steps, dim=1).to(torch.int32),
-            }
-            if save_token_logprobs and x0_logprobs_steps:
-                batch_trace["x0_token_logprobs"] = torch.stack(x0_logprobs_steps, dim=1).to(torch.float32)
-            if save_topk:
-                batch_trace["topk_logits"] = torch.stack(topk_logits_steps, dim=1).to(torch.float16)
-                batch_trace["topk_token_ids"] = torch.stack(topk_ids_steps, dim=1).to(torch.int32)
-            trace_batches.append(batch_trace)
-
-        del encoded, input_ids, attention_mask, full_attention_mask, x
-        if torch.cuda.is_available() and str(device).startswith("cuda"):
+        if is_cuda:
             torch.cuda.empty_cache()
 
-    rich_traces = _merge_trace_batches(trace_batches) if save_trajectory else {}
-    return generated_answers, rich_traces
+        response_ids = x[:, prompt_len:]
 
+        final_logits = model(
+            x, attention_mask=full_attention_mask
+        ).logits[:, prompt_len:, :]
+        del x, full_attention_mask
 
-def generate_llada(model, prompts, device, **kwargs):
-    return generate(model, prompts, device, backend="llada", **kwargs)
+        final_logits = final_logits.float()
+        log_probs = F.log_softmax(final_logits, dim=-1)
+        del final_logits
+        k = min(top_k, log_probs.shape[-1])
+        tk_logprobs, tk_ids = torch.topk(log_probs, k=k, dim=-1)
+        del log_probs
+        topk_logprobs_batches.append(tk_logprobs.cpu().to(torch.float32))
+        topk_ids_batches.append(tk_ids.cpu().to(torch.int32))
+        del tk_logprobs, tk_ids
 
-
-def generate_dream(model, prompts, device, **kwargs):
-    return generate(model, prompts, device, backend="dream", **kwargs)
-
-
-@torch.no_grad()
-def generate_nemotron(
-    model: Any,
-    prompts: list[str],
-    device: Any,
-    *,
-    batch_size: int = 8,
-    tokenizer: Any = None,
-    steps: int = 128,
-    gen_length: int = 128,
-    temperature: float = 0.0,
-    remasking: str = "low_confidence",
-    mask_id: int = 126336,
-    eos_token_ids: list[int] | tuple[int, ...] | None = None,
-    logits_eos_inf: bool = False,
-    confidence_eos_eot_inf: bool = False,
-    save_trajectory: bool = True,
-    k_topk_logits: int = 64,
-    save_token_logprobs: bool = True,
-    backend: str = "nemotron",
-) -> tuple[list[str], dict[str, torch.Tensor]]:
-    """Nemotron-native diffusion generation with KV-cached prompt prefill.
-
-    Pure diffusion (single block): causal prefill encodes the prompt into a KV
-    cache, then denoising steps only forward the gen_length block.  This allows
-    batching (padding is handled during causal prefill where attention_mask is
-    respected) and reduces per-step cost from O(prompt+gen) to O(gen).
-    """
-    from src.generate._forward import nemotron_prefill, nemotron_block_logits
-
-    generated_answers: list[str] = []
-    trace_batches: list[dict[str, torch.Tensor]] = []
-    save_topk = save_trajectory and k_topk_logits is not None
-    noise_buf = None
-
-    for batch_start in tqdm(
-        range(0, len(prompts), batch_size),
-        total=(len(prompts) + batch_size - 1) // batch_size,
-        desc="Generating batches",
-    ):
-        prompt_batch = prompts[batch_start:batch_start + batch_size]
-        encoded = tokenizer(prompt_batch, add_special_tokens=False, padding=True, return_tensors="pt")
-        input_ids = encoded["input_ids"].to(device)
-        attention_mask = encoded["attention_mask"].to(device)
-        B = input_ids.shape[0]
-
-        # -- Phase 1: causal prefill (bidirectional OFF) -----------------------
-        # attention_mask is respected during causal attention, so padding is safe.
-        past_key_values, prefill_logits = nemotron_prefill(model, input_ids, attention_mask)
-
-        # -- Phase 2: build mask block -----------------------------------------
-        block = torch.full((B, gen_length), mask_id, dtype=torch.long, device=device)
-
-        if save_trajectory:
-            intermediate_x0_pred = []
-            response_token_steps = []
-            mask_status_steps = []
-            newly_unmasked_steps = []
-            remasked_steps = []
-            x_gen_count_steps = []
-            x0_gen_count_steps = []
-            if save_token_logprobs:
-                x0_logprobs_steps = []
-            previous_mask = torch.ones((B, gen_length), dtype=torch.bool, device=device)
-        if save_topk:
-            topk_logits_steps = []
-            topk_ids_steps = []
-
-        num_unmasked_per_step = max(1, (gen_length + steps - 1) // steps)
-
-        # -- Phase 3: denoising loop (bidirectional ON via prefill toggle) -----
-        for step_i in range(steps):
-            mask_index = block == mask_id
-
-            # Forward only the block against the cached prompt KV
-            response_logits = nemotron_block_logits(model, block, past_key_values)
-
-            if logits_eos_inf and eos_token_ids:
-                for _eos_id in eos_token_ids:
-                    if 0 <= _eos_id < response_logits.shape[-1]:
-                        response_logits[:, :, _eos_id] = -torch.inf
-            response_logits = response_logits.float()
-            response_logits = _mask_undecodable_token_logits(response_logits, tokenizer)
-
-            if save_topk and step_i == steps - 1:
-                tk_logits, tk_ids = torch.topk(response_logits, k=min(int(k_topk_logits), response_logits.shape[-1]), dim=-1)
-                topk_logits_steps.append(tk_logits.detach().to(torch.float16).cpu())
-                topk_ids_steps.append(tk_ids.detach().to(torch.int32).cpu())
-                del tk_logits, tk_ids
-
-            if temperature > 0 and (noise_buf is None or noise_buf.shape != response_logits.shape):
-                noise_buf = torch.empty(response_logits.shape, dtype=torch.float32, device=response_logits.device)
-            logits_noisy = add_gumbel_noise(response_logits, temperature=temperature, _noise_buf=noise_buf)
-            x0_sampled = torch.argmax(logits_noisy, dim=-1)
-            del logits_noisy
-
-            # -- x0 prediction trace (always greedy argmax, independent of sampling) --
-            if save_trajectory:
-                x0_greedy = torch.argmax(response_logits, dim=-1)
-                x0_obs_ids = torch.where(mask_index, x0_greedy, block)
-                if save_token_logprobs:
-                    sel = torch.gather(response_logits, dim=-1, index=x0_obs_ids.unsqueeze(-1)).squeeze(-1)
-                    norm = torch.logsumexp(response_logits, dim=-1)
-                    x0_logprobs_steps.append((sel - norm).detach().to(torch.float32).cpu())
-                intermediate_x0_pred.append(x0_obs_ids.detach().to(torch.int32).cpu())
-                x0_gen_count_steps.append(_non_special_token_counts(tokenizer, x0_obs_ids, extra_special_ids=(mask_id,)))
-                del x0_obs_ids, x0_greedy
-
-            # -- Confidence-based token selection ----------------------------------
-            if remasking == "low_confidence":
-                logits_conf = response_logits
-                if confidence_eos_eot_inf and eos_token_ids:
-                    logits_conf = response_logits.clone()
-                    for _eos_id in eos_token_ids:
-                        if 0 <= _eos_id < logits_conf.shape[-1]:
-                            logits_conf[:, :, _eos_id] = -torch.inf
-                x0_p = _selected_token_probability(logits_conf, x0_sampled)
-                if logits_conf is not response_logits:
-                    del logits_conf
-            elif remasking == "random":
-                x0_p = torch.rand(x0_sampled.shape, device=x0_sampled.device)
-            else:
-                raise ValueError(f"Unsupported remasking: {remasking}")
-
-            x0_sampled = torch.where(mask_index, x0_sampled, block)
-            confidence = torch.where(mask_index, x0_p, -torch.inf)
-
-            transfer = torch.zeros_like(mask_index, dtype=torch.bool, device=device)
-            _, sel_idx = torch.topk(confidence, k=min(num_unmasked_per_step, confidence.shape[1]), largest=True, dim=-1)
-            transfer.scatter_(dim=-1, index=sel_idx, value=True)
-            transfer &= mask_index
-            block[transfer] = x0_sampled[transfer]
-
-            if save_trajectory:
-                cur_mask = block == mask_id
-                response_token_steps.append(block.detach().to(torch.int32).cpu())
-                mask_status_steps.append(cur_mask.detach().cpu())
-                newly_unmasked_steps.append((previous_mask & ~cur_mask).detach().cpu())
-                remasked_steps.append((~previous_mask & cur_mask).detach().cpu())
-                x_gen_count_steps.append(_non_special_token_counts(tokenizer, block, extra_special_ids=(mask_id,)))
-                previous_mask = cur_mask.clone()
-
-            del response_logits, x0_sampled, x0_p, confidence, transfer
-
-        # -- Decode final answers ----------------------------------------------
-        generated_answers.extend(
-            ans.strip() for ans in tokenizer.batch_decode(block, skip_special_tokens=True)
+        all_answers.extend(
+            ans.strip()
+            for ans in tokenizer.batch_decode(
+                response_ids, skip_special_tokens=True
+            )
         )
+        del response_ids
 
-        if save_trajectory:
-            mask_status = torch.stack(mask_status_steps, dim=1).to(torch.bool)
-            batch_trace = {
-                "response_token_ids": torch.stack(response_token_steps, dim=1).to(torch.int32),
-                "x0_pred_token_ids": torch.stack(intermediate_x0_pred, dim=1).to(torch.int32),
-                "mask_status": mask_status,
-                "unmasked_status": ~mask_status,
-                "newly_unmasked": torch.stack(newly_unmasked_steps, dim=1).to(torch.bool),
-                "remasked": torch.stack(remasked_steps, dim=1).to(torch.bool),
-                "x_generated_token_counts": torch.stack(x_gen_count_steps, dim=1).to(torch.int32),
-                "x0_generated_token_counts": torch.stack(x0_gen_count_steps, dim=1).to(torch.int32),
-            }
-            if save_token_logprobs and x0_logprobs_steps:
-                batch_trace["x0_token_logprobs"] = torch.stack(x0_logprobs_steps, dim=1).to(torch.float32)
-            if save_topk:
-                batch_trace["topk_logits"] = torch.stack(topk_logits_steps, dim=1).to(torch.float16)
-                batch_trace["topk_token_ids"] = torch.stack(topk_ids_steps, dim=1).to(torch.int32)
-            trace_batches.append(batch_trace)
-
-        del encoded, input_ids, attention_mask, past_key_values, block
-        if torch.cuda.is_available() and str(device).startswith("cuda"):
+        if is_cuda:
             torch.cuda.empty_cache()
 
-    rich_traces = _merge_trace_batches(trace_batches) if save_trajectory else {}
-    return generated_answers, rich_traces
+    topk_data = {
+        "topk_logprobs": torch.cat(topk_logprobs_batches, dim=0),
+        "topk_token_ids": torch.cat(topk_ids_batches, dim=0),
+    }
+    return all_answers, topk_data

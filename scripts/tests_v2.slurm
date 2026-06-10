@@ -17,7 +17,7 @@ export TEST_TARGET="${TEST_TARGET:-tests/}"
 export PYTEST_ARGS="${PYTEST_ARGS:--q -x}"
 
 init_uq_slurm_env
-print_uq_header "uncertainty-DLM test suite"
+print_uq_header "Bench_UQ_dLLMs test suite"
 echo "Test target: $TEST_TARGET"
 echo "Pytest args: $PYTEST_ARGS"
 

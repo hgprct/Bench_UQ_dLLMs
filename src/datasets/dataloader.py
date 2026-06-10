@@ -194,26 +194,6 @@ def expand_response_samples(
     return expanded_qa, expanded_prompts
 
 
-def interleave_traces(
-    greedy_traces: dict[str, Any],
-    sampled_traces: dict[str, Any],
-    num_questions: int,
-    num_sampled: int,
-) -> dict[str, Any]:
-    """Interleave greedy [Q,T,L] and sampled [Q*N,T,L] tensors into [Q*(1+N),T,L]."""
-    import torch
-    interleaved = {}
-    for key in sorted(greedy_traces):
-        gt = greedy_traces[key]
-        st = sampled_traces[key]
-        chunks = []
-        for q in range(num_questions):
-            chunks.append(gt[q : q + 1])
-            chunks.append(st[q * num_sampled : (q + 1) * num_sampled])
-        interleaved[key] = torch.cat(chunks, dim=0)
-    return interleaved
-
-
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
