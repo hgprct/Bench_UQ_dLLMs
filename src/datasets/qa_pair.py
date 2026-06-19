@@ -31,5 +31,10 @@ class QASample(TypedDict, total=False):
     question_decomposition: Any
     source_language: str
     target_language: str
+    # Multimodal fields (e.g. MathVision)
+    image: Any                 # PIL.Image associated with the question
+    options: list[str] | None  # multiple-choice options (empty list = free-form)
+    subject: str
+    solution: str
 
 

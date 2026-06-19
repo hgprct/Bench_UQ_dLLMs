@@ -5,7 +5,10 @@ from __future__ import annotations
 from types import ModuleType
 
 from src.datasets.dataset_specific import xsum
-from src.datasets.dataset_specific import gsm8k, hotpotqa, musique, samsum, triviaqa, wmt14_fr_en
+from src.datasets.dataset_specific import (
+    competition_math, drive_bench, gsm8k, hotpotqa, livebench_reasoning,
+    mathvision, medmcqa, musique, samsum, triviaqa, vilp, vqa_rad, wmt14_fr_en,
+)
 
 _MODULES: dict[str, ModuleType] = {
     "triviaqa": triviaqa,
@@ -15,6 +18,13 @@ _MODULES: dict[str, ModuleType] = {
     "samsum": samsum,
     "hotpotqa": hotpotqa,
     "musique": musique,
+    "mathvision": mathvision,
+    "competition_math": competition_math,
+    "medmcqa": medmcqa,
+    "livebench_reasoning": livebench_reasoning,
+    "vqa_rad": vqa_rad,
+    "drive_bench": drive_bench,
+    "vilp": vilp,
 }
 
 

@@ -1,0 +1,22 @@
+{
+  "model_family": "DLM",
+  "model_id": "Gen-Verse/MMaDA-8B-MixCoT",
+  "dataset": "mathvision",
+  "dataset_config_name": null,
+  "split": "test",
+  "label_method": "llm_judge",
+  "batch_size": 1,
+  "num_questions": 1000,
+  "max_gen_length": 512,
+  "steps": 256,
+  "block_size": 128,
+  "remasking": "lc",
+  "temperature": 0.0,
+  "cfg_scale": 0.0,
+  "num_response_samples": 0,
+  "generate_greedy": true,
+  "top_k": 64,
+  "fewshot_k": 0,
+  "confidence_eos_eot_inf": false,
+  "vq_model_id": "showlab/magvitv2"
+}

@@ -9,22 +9,25 @@ import os
 import torch
 
 from src.generate import calibrate_batch_size, generate as generate_fn
+from src.generate import dream, nemotron_diffusion, nemotron_vlm
+from src.generate.mmada_mmu import generate_mmu
 from src.generate.traces import save_results
 from src.config import (
-    Dataset, GENERATION_DEFAULTS, Model, Remasking,
-    build_generation_config, derive_run_id, load_config, resolve_remasking,
+    BATCHING_FAMILIES, Dataset, GENERATION_DEFAULTS, MMADA_VQ_MODEL_ID,
+    MULTIMODAL_FAMILIES, Model, Remasking, build_generation_config,
+    derive_run_id, load_config, model_family, resolve_remasking,
 )
 from src.seed import seed_everything
 from src.datasets.dataloader import (
     apply_chat_template,
+    build_raw_prompts,
     expand_greedy_and_sampled,
     expand_response_samples,
     load_prompts_jsonl,
-    prepare_dataset_inputs,
 )
 from src.generate.model import (
     infer_eos_token_ids, infer_mask_token_id,
-    load_model, load_tokenizer, pad_token_id as get_pad_token_id,
+    load_model, load_tokenizer, load_vq_model, pad_token_id as get_pad_token_id,
 )
 
 
@@ -106,6 +109,13 @@ def _setup_model(config: dict, device):
     if tokenizer.padding_side != "left":
         tokenizer.padding_side = "left"
 
+    # MMaDA multimodal-understanding needs the MAGVIT-v2 VQ image tokenizer.
+    vq_model = None
+    if model_family(model_id) == "mmada":
+        vq_id = config.get("vq_model_id", MMADA_VQ_MODEL_ID)
+        print(f"[gen] Loading VQ image tokenizer: {vq_id}")
+        vq_model = load_vq_model(vq_id, device)
+
     eos_token_ids = infer_eos_token_ids(tokenizer, model_id=model_id)
     ptid = get_pad_token_id(tokenizer)
     if ptid is None:
@@ -118,19 +128,28 @@ def _setup_model(config: dict, device):
 
     if config.get("mask_id") is None:
         config["mask_id"] = infer_mask_token_id(tokenizer, model=model)
-    if config.get("mask_id") is None:
+    # Only the block-diffusion backends (LLaDA, MMaDA, Dream) consume an explicit
+    # mask id. Nemotron's threshold-driven loop handles masking internally.
+    if config.get("mask_id") is None and model_family(model_id) in (
+        "llada", "mmada", "dream",
+    ):
         raise ValueError("mask_id could not be inferred; set it in the config")
     config["eos_token_ids"] = eos_token_ids
 
-    return model, tokenizer, eos_token_ids, ptid
+    return model, tokenizer, eos_token_ids, ptid, vq_model
 
 
 def _load_or_prepare_inputs(config, args, tokenizer, output_dir):
+    """Return ``(dataset_key, qa_pairs, prompts, raw_prompts)``.
+
+    ``prompts`` are chat-templated (text backends tokenize these directly);
+    ``raw_prompts`` are untemplated (the multimodal backends build their own
+    chat/message structure around the image, so they consume raw text).
+    """
     prompts_path = args.prompts or os.path.join(output_dir, "prompts.jsonl")
     if os.path.isfile(prompts_path):
         print(f"Loading prepared prompts from {prompts_path}...")
         dataset_key, qa_pairs, raw_prompts = load_prompts_jsonl(prompts_path)
-        prompts = apply_chat_template(raw_prompts, tokenizer)
         print(f"Loaded {len(qa_pairs)} prompts from '{dataset_key}'.")
     else:
         fewshot_k = int(config["fewshot_k"])
@@ -138,12 +157,22 @@ def _load_or_prepare_inputs(config, args, tokenizer, output_dir):
             print(f"[gen] Few-shot: {fewshot_k} examples")
         hf_token = os.environ.get("HF_TOKEN", "")
         print("Preparing dataset inputs inline...")
-        dataset_key, qa_pairs, prompts = prepare_dataset_inputs(config, tokenizer, hf_token)
+        dataset_key, qa_pairs, raw_prompts = build_raw_prompts(config, hf_token)
+        if not qa_pairs:
+            raise ValueError("No QA pairs found in dataset")
         print(f"Prepared {len(qa_pairs)} prompts from '{dataset_key}'.")
-    return dataset_key, qa_pairs, prompts
+    prompts = apply_chat_template(raw_prompts, tokenizer)
+    return dataset_key, qa_pairs, prompts, raw_prompts
 
 
-def _run_generation(qa_pairs, prompts, config, common_kwargs, seed):
+def _run_generation(qa_pairs, prompts, config, gen_one, seed):
+    """Drive greedy / sampled generation.
+
+    *gen_one(prompts, qa_list, temperature)* runs one generation pass and
+    returns ``(answers, topk_data)``. The qa_list is passed in lockstep with
+    prompts so the multimodal path can recover per-prompt images from it; the
+    text path ignores it.
+    """
     num_sampled = int(config["num_response_samples"])
     temperature = float(config["temperature"])
     generate_greedy = bool(config["generate_greedy"])
@@ -156,11 +185,11 @@ def _run_generation(qa_pairs, prompts, config, common_kwargs, seed):
             total = 1 + num_sampled
             print(f"[gen] Two-pass: 1 greedy + {num_sampled} sampled (T={temperature})")
 
-            greedy_answers, greedy_topk = generate_fn(prompts=prompts, temperature=0.0, **common_kwargs)
+            greedy_answers, greedy_topk = gen_one(prompts, qa_pairs, 0.0)
 
             seed_everything(seed + 1)
             sampled_qa, sampled_prompts = expand_response_samples(qa_pairs, prompts, num_sampled)
-            sampled_answers, sampled_topk = generate_fn(prompts=sampled_prompts, temperature=temperature, **common_kwargs)
+            sampled_answers, sampled_topk = gen_one(sampled_prompts, sampled_qa, temperature)
 
             merged_qa, merged_prompts = expand_greedy_and_sampled(qa_pairs, prompts, num_sampled)
             all_answers = _interleave_answers(greedy_answers, sampled_answers, len(qa_pairs), num_sampled)
@@ -169,13 +198,13 @@ def _run_generation(qa_pairs, prompts, config, common_kwargs, seed):
         else:
             print(f"[gen] Sampled-only: {num_sampled} samples per prompt (T={temperature})")
             merged_qa, merged_prompts = expand_response_samples(qa_pairs, prompts, num_sampled)
-            all_answers, topk_data = generate_fn(prompts=merged_prompts, temperature=temperature, **common_kwargs)
+            all_answers, topk_data = gen_one(merged_prompts, merged_qa, temperature)
     else:
         if num_sampled > 1:
             print(f"[gen] temperature=0: ignoring num_response_samples={num_sampled}, generating 1 greedy response per prompt")
         print("[gen] Greedy-only: 1 deterministic response per prompt")
         merged_qa, merged_prompts = list(qa_pairs), list(prompts)
-        all_answers, topk_data = generate_fn(prompts=merged_prompts, temperature=0.0, **common_kwargs)
+        all_answers, topk_data = gen_one(merged_prompts, merged_qa, 0.0)
         config["num_response_samples"] = 1
 
     return merged_qa, merged_prompts, all_answers, topk_data
@@ -243,12 +272,45 @@ def main(argv: list[str] | None = None) -> None:
     print(f"[gen] Device: {device}")
     print(f"[gen] Model: {config['model_id']}")
 
-    model, tokenizer, eos_token_ids, ptid = _setup_model(config, device)
-    dataset_key, qa_pairs, prompts = _load_or_prepare_inputs(config, args, tokenizer, output_dir)
+    model, tokenizer, eos_token_ids, ptid, vq_model = _setup_model(config, device)
+    dataset_key, qa_pairs, prompts, raw_prompts = _load_or_prepare_inputs(
+        config, args, tokenizer, output_dir,
+    )
 
-    # Auto-calibrate batch size unless user explicitly provided --batch_size
-    use_auto_bs = args.auto_batch_size and args.batch_size is None
-    if use_auto_bs:
+    family = model_family(config["model_id"])
+    print(f"[gen] Inference family: {family}")
+
+    # Multimodal backends (MMaDA mmu, Nemotron-VLM) are taken when the model is a
+    # vision model and the dataset carries images (e.g. MathVision). They build
+    # their own chat/message structure around the image, so they consume the raw
+    # (untemplated) prompt text; text backends use the chat-templated prompts.
+    has_images = bool(qa_pairs) and isinstance(qa_pairs[0], dict) and qa_pairs[0].get("image") is not None
+    multimodal = family in MULTIMODAL_FAMILIES and has_images
+    if family in MULTIMODAL_FAMILIES and not has_images:
+        raise ValueError(
+            f"Model '{config['model_id']}' is multimodal ({family}) but dataset "
+            f"'{dataset_key}' provides no images; this model runs via the "
+            "image+text path only."
+        )
+    gen_prompts = raw_prompts if multimodal else prompts
+
+    block_size = config.get("block_size")
+    if block_size is not None:
+        block_size = int(block_size)
+
+    # Auto-calibrate batch size only for the batched text backends (LLaDA, Dream)
+    # and only when the user did not set --batch_size. The multimodal and Nemotron
+    # backends generate one item at a time (variable-length sequences / per-item
+    # threshold loops), so calibration -- which probes batched text forward passes
+    # -- is skipped and batch_size is pinned to 1.
+    use_auto_bs = (
+        args.auto_batch_size and args.batch_size is None
+        and family in BATCHING_FAMILIES
+    )
+    if multimodal or family == "nemotron":
+        config["batch_size"] = 1
+        print(f"[gen] {family}: per-item generation (batch_size=1)")
+    elif use_auto_bs:
         print("[gen] Calibrating batch size...")
         calibrated_bs = calibrate_batch_size(
             model, tokenizer, device,
@@ -262,10 +324,8 @@ def main(argv: list[str] | None = None) -> None:
     else:
         print(f"[gen] Using configured batch_size={config['batch_size']}")
 
-    block_size = config.get("block_size")
-    if block_size is not None:
-        block_size = int(block_size)
-
+    # Common kwargs shared by the block-diffusion text backends. mask_id may be
+    # None for Nemotron (threshold-driven); its module ignores it.
     common_kwargs = dict(
         model=model,
         device=device,
@@ -276,16 +336,60 @@ def main(argv: list[str] | None = None) -> None:
         block_size=block_size,
         cfg_scale=float(config.get("cfg_scale", 0.0)),
         remasking=resolve_remasking(config["remasking"]),
-        mask_id=config["mask_id"],
+        mask_id=config.get("mask_id"),
         eos_token_ids=eos_token_ids,
         logits_eos_inf=config["logits_eos_inf"],
         confidence_eos_eot_inf=config["confidence_eos_eot_inf"],
         top_k=config["top_k"],
     )
+    threshold = float(config.get("nemotron_threshold", 0.9))
+
+    def gen_one(call_prompts, qa_list, temperature):
+        if family == "mmada":
+            images = [qa["image"] for qa in qa_list]
+            return generate_mmu(
+                model, call_prompts, images, device,
+                tokenizer=tokenizer, vq_model=vq_model,
+                steps=config["steps"], max_gen_length=config["max_gen_length"],
+                block_size=block_size, temperature=temperature,
+                cfg_scale=float(config.get("cfg_scale", 0.0)),
+                remasking=resolve_remasking(config["remasking"]),
+                mask_id=config["mask_id"], top_k=config["top_k"],
+            )
+        if family == "nemotron_vlm":
+            images = [qa["image"] for qa in qa_list]
+            return nemotron_vlm.generate_vlm(
+                model, call_prompts, images, device,
+                tokenizer=tokenizer, model_id=config["model_id"],
+                steps=config["steps"], max_gen_length=config["max_gen_length"],
+                block_size=block_size, temperature=temperature,
+                top_k=config["top_k"], threshold=threshold,
+            )
+        if family == "dream":
+            return dream.generate(
+                prompts=call_prompts, temperature=temperature,
+                alg=config.get("dream_alg"),
+                alg_temp=config.get("dream_alg_temp", 0.0),
+                dream_top_p=config.get("dream_top_p"),
+                dream_top_k=config.get("dream_top_k"),
+                **common_kwargs,
+            )
+        if family == "nemotron":
+            return nemotron_diffusion.generate(
+                prompts=call_prompts, temperature=temperature,
+                threshold=threshold, **common_kwargs,
+            )
+        return generate_fn(prompts=call_prompts, temperature=temperature, **common_kwargs)
 
     merged_qa, merged_prompts, all_answers, topk_data = _run_generation(
-        qa_pairs, prompts, config, common_kwargs, seed,
+        qa_pairs, gen_prompts, config, gen_one, seed,
     )
+
+    # PIL images cannot be JSON-serialised; drop them before writing traces.
+    merged_qa = [
+        {k: v for k, v in qa.items() if k != "image"} if isinstance(qa, dict) else qa
+        for qa in merged_qa
+    ]
 
     from src.registry import get_dataset_module
     dataset_module = get_dataset_module(dataset_key)

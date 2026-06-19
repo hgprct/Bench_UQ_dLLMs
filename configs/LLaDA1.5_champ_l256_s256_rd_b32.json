@@ -1,0 +1,21 @@
+{
+  "model_family": "DLM",
+  "model_id": "GSAI-ML/LLaDA-1.5",
+  "dataset": "champ",
+  "dataset_config_name": null,
+  "split": "train",
+  "label_method": "llm_judge",
+  "batch_size": 16,
+  "num_questions": 100,
+  "max_gen_length": 256,
+  "steps": 256,
+  "block_size": 32,
+  "remasking": "rd",
+  "temperature": 0.0,
+  "cfg_scale": 0.0,
+  "num_response_samples": 0,
+  "generate_greedy": true,
+  "top_k": 64,
+  "fewshot_k": 0,
+  "confidence_eos_eot_inf": false
+}

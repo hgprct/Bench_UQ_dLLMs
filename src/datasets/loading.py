@@ -21,21 +21,31 @@ def load_hf_dataset(
 
 def load_local_dataset(
     path: str | Path,
-    file_format: str = "jsonl",
-) -> list[dict[str, Any]]:
-    """Load a dataset from a local file (jsonl or json)."""
+    file_format: str | None = None,
+) -> Any:
+    """Load a dataset from a local file (jsonl, json, or parquet).
+
+    The format is inferred from the file extension unless *file_format* is given.
+    Parquet returns a ``datasets.Dataset`` (supports ``len`` and integer indexing
+    like an HF dataset, and decodes Image/struct features); json/jsonl return a
+    ``list[dict]``. Both are consumed identically by ``build_raw_prompts``.
+    """
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Dataset file not found: {path}")
 
-    if file_format == "jsonl":
+    fmt = (file_format or path.suffix.lstrip(".")).lower()
+    if fmt == "jsonl":
         from src.utils.io import read_jsonl
         return read_jsonl(path)
-    elif file_format == "json":
+    elif fmt == "json":
         from src.utils.io import read_json
         data = read_json(path)
         if isinstance(data, list):
             return data
         raise ValueError(f"Expected a JSON array in {path}")
+    elif fmt in ("parquet", "pq"):
+        from datasets import Dataset
+        return Dataset.from_parquet(str(path))
     else:
-        raise ValueError(f"Unsupported file format: {file_format}")
+        raise ValueError(f"Unsupported file format: {fmt!r} for {path}")

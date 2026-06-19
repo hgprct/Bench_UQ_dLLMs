@@ -64,10 +64,18 @@ def build_raw_prompts(
             token=hf_token,
         )
 
-    all_samples: list[QASample] = [
-        s for i in range(len(dataset))
-        if (s := dataset_module.extract_qa_sample(dataset[i])) is not None
-    ]
+    # ``extract_qa_sample`` returns a QASample, ``None`` (skip), or a list of
+    # QASamples. The list form lets one source row fan out into several samples
+    # (e.g. ViLP pairs one question with three images -> three samples).
+    all_samples: list[QASample] = []
+    for i in range(len(dataset)):
+        result = dataset_module.extract_qa_sample(dataset[i])
+        if result is None:
+            continue
+        if isinstance(result, list):
+            all_samples.extend(result)
+        else:
+            all_samples.append(result)
 
     fewshot_k = int(generation_config.get("fewshot_k", ds_config.fewshot_k))
     fewshot_samples = all_samples[:fewshot_k]
