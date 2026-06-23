@@ -72,16 +72,20 @@ def calibrate_batch_size(
             dummy = torch.full(
                 (mid, total_seq_len), mask_id, dtype=torch.long, device=device,
             )
-            attn = torch.ones_like(dummy)
-            out = model(dummy, attention_mask=attn).logits
+            # No attention_mask: an all-ones mask is identical to no mask for the
+            # memory probe, and a 2D mask is family-specific (LLaDA converts it
+            # internally; Dream's DreamSdpaAttention forwards it raw to SDPA, which
+            # under torch>=2.7 rejects the long dtype). Omitting it keeps the probe
+            # valid for every batched family.
+            out = model(dummy).logits
             out_gen = out[:, max_prompt_len:, :].float()
             _ = F.log_softmax(out_gen, dim=-1)
-            del dummy, attn, out, out_gen, _
+            del dummy, out, out_gen, _
             torch.cuda.empty_cache()
             best = mid
             lo = mid + 1
         except torch.cuda.OutOfMemoryError:
-            del dummy, attn
+            del dummy
             torch.cuda.empty_cache()
             hi = mid - 1
 

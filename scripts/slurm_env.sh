@@ -44,6 +44,12 @@ init_uq_slurm_env() {
     esac
   fi
 
+  # Explicit overlay override. Lets a job pick a specific overlay (e.g. the
+  # transformers-5.x Nemotron layer) on top of the base sif without touching
+  # .env's CONTAINER_IMAGE. Unset -> keep the derived default (overlay.img).
+  #   CONTAINER_OVERLAY=$PROJECT/overlay_nemotron.img sbatch scripts/generate_v2.slurm ...
+  export OVERLAY="${CONTAINER_OVERLAY:-${OVERLAY}}"
+
   export PYTHONUNBUFFERED=1
   export TOKENIZERS_PARALLELISM=false
   unset TRANSFORMERS_CACHE
@@ -95,6 +101,12 @@ run_in_uq_container() {
       
       # On ajoute le dossier racine au PYTHONPATH pour que "src" soit détecté
       export PYTHONPATH="$PROJECT_DIR${PYTHONPATH:+:$PYTHONPATH}"
+      # The Nemotron overlay ships its transformers-5.x stack in /opt/nemo5 (a
+      # separate prefix, installed with `pip --target` so it never uninstalls a
+      # base package -- which keeps it visible under a read-only overlay). Put it
+      # first on PYTHONPATH so transformers 5.x + its metadata win over the base
+      # 4.x. Absent for DLM runs (dir does not exist) -> no-op.
+      [ -d /opt/nemo5 ] && export PYTHONPATH="/opt/nemo5:$PYTHONPATH"
       export LD_LIBRARY_PATH="/usr/local/cuda/compat/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
       export VLLM_WORKER_MULTIPROC_METHOD=spawn
       export VLLM_USE_V1=0

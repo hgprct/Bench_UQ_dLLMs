@@ -135,10 +135,16 @@ def generate(
             ],
             dim=-1,
         )
+        # DreamSdpaAttention forwards the mask straight to
+        # scaled_dot_product_attention, which (torch>=2.7) needs a bool/float 4D
+        # mask, not the 2D long padding mask. Build the [B,1,S,S] bool mask exactly
+        # as Dream's own _sample does (logical-and of the key/query keep-masks).
+        m2d = full_attention_mask.bool()
+        attn_mask_4d = m2d.unsqueeze(1).unsqueeze(-2) & m2d.unsqueeze(1).unsqueeze(-1)
         final_logits = model(
-            x, attention_mask=full_attention_mask
+            x, attention_mask=attn_mask_4d
         ).logits[:, prompt_len:, :].float()
-        del x, full_attention_mask, attention_mask
+        del x, full_attention_mask, attn_mask_4d, m2d, attention_mask
 
         log_probs = F.log_softmax(final_logits, dim=-1)
         del final_logits

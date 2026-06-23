@@ -15,15 +15,16 @@ from src.generate.traces import save_results
 from src.config import (
     BATCHING_FAMILIES, Dataset, GENERATION_DEFAULTS, MMADA_VQ_MODEL_ID,
     MULTIMODAL_FAMILIES, Model, Remasking, build_generation_config,
-    derive_run_id, load_config, model_family, resolve_remasking,
+    derive_run_id, load_config, model_family, model_name_from_id,
+    resolve_remasking,
 )
 from src.seed import seed_everything
-from src.datasets.dataloader import (
+from src.datasets.dataloader import build_raw_prompts, load_prompts_jsonl
+from src.datasets.outputs import load_image, write_results_jsonl
+from src.generate.inputs import (
     apply_chat_template,
-    build_raw_prompts,
     expand_greedy_and_sampled,
     expand_response_samples,
-    load_prompts_jsonl,
 )
 from src.generate.model import (
     infer_eos_token_ids, infer_mask_token_id,
@@ -139,18 +140,36 @@ def _setup_model(config: dict, device):
     return model, tokenizer, eos_token_ids, ptid, vq_model
 
 
-def _load_or_prepare_inputs(config, args, tokenizer, output_dir):
+def _load_or_prepare_inputs(config, args, tokenizer, output_dir, multimodal_family):
     """Return ``(dataset_key, qa_pairs, prompts, raw_prompts)``.
 
     ``prompts`` are chat-templated (text backends tokenize these directly);
-    ``raw_prompts`` are untemplated (the multimodal backends build their own
-    chat/message structure around the image, so they consume raw text).
+    ``raw_prompts`` are untemplated. The multimodal backends build their own
+    chat/message structure around the image, so they consume raw text -- and
+    their tokenizers may not even define a chat template -- hence chat-templating
+    is skipped for multimodal families (``prompts`` mirrors ``raw_prompts``).
     """
     prompts_path = args.prompts or os.path.join(output_dir, "prompts.jsonl")
     if os.path.isfile(prompts_path):
         print(f"Loading prepared prompts from {prompts_path}...")
         dataset_key, qa_pairs, raw_prompts = load_prompts_jsonl(prompts_path)
         print(f"Loaded {len(qa_pairs)} prompts from '{dataset_key}'.")
+        # prompts.jsonl is text-only (images are not serialised). For multimodal
+        # backends, reattach each image from the shared on-disk images folder.
+        if multimodal_family:
+            missing = 0
+            for qa in qa_pairs:
+                if qa.get("image") is None:
+                    img = load_image(dataset_key, str(qa.get("image_id") or qa.get("id")))
+                    if img is None:
+                        missing += 1
+                    else:
+                        qa["image"] = img
+            if missing:
+                print(
+                    f"[gen] WARNING: {missing}/{len(qa_pairs)} images missing under "
+                    f"outputs/{dataset_key}/images/ (re-run data prep for this dataset)"
+                )
     else:
         fewshot_k = int(config["fewshot_k"])
         if fewshot_k > 0:
@@ -161,7 +180,7 @@ def _load_or_prepare_inputs(config, args, tokenizer, output_dir):
         if not qa_pairs:
             raise ValueError("No QA pairs found in dataset")
         print(f"Prepared {len(qa_pairs)} prompts from '{dataset_key}'.")
-    prompts = apply_chat_template(raw_prompts, tokenizer)
+    prompts = raw_prompts if multimodal_family else apply_chat_template(raw_prompts, tokenizer)
     return dataset_key, qa_pairs, prompts, raw_prompts
 
 
@@ -172,6 +191,11 @@ def _run_generation(qa_pairs, prompts, config, gen_one, seed):
     returns ``(answers, topk_data)``. The qa_list is passed in lockstep with
     prompts so the multimodal path can recover per-prompt images from it; the
     text path ignores it.
+
+    Returns ``(merged_qa, merged_prompts, all_answers, topk_data,
+    greedy_by_prompt)`` where ``greedy_by_prompt`` holds the single greedy answer
+    per *original* prompt (``None`` when no greedy pass was run), used to fill the
+    clean per-model results JSONL.
     """
     num_sampled = int(config["num_response_samples"])
     temperature = float(config["temperature"])
@@ -195,10 +219,12 @@ def _run_generation(qa_pairs, prompts, config, gen_one, seed):
             all_answers = _interleave_answers(greedy_answers, sampled_answers, len(qa_pairs), num_sampled)
             topk_data = _interleave_topk(greedy_topk, sampled_topk, len(qa_pairs), num_sampled)
             config["num_response_samples"] = total
+            greedy_by_prompt = list(greedy_answers)
         else:
             print(f"[gen] Sampled-only: {num_sampled} samples per prompt (T={temperature})")
             merged_qa, merged_prompts = expand_response_samples(qa_pairs, prompts, num_sampled)
             all_answers, topk_data = gen_one(merged_prompts, merged_qa, temperature)
+            greedy_by_prompt = [None] * len(qa_pairs)
     else:
         if num_sampled > 1:
             print(f"[gen] temperature=0: ignoring num_response_samples={num_sampled}, generating 1 greedy response per prompt")
@@ -206,8 +232,9 @@ def _run_generation(qa_pairs, prompts, config, gen_one, seed):
         merged_qa, merged_prompts = list(qa_pairs), list(prompts)
         all_answers, topk_data = gen_one(merged_prompts, merged_qa, 0.0)
         config["num_response_samples"] = 1
+        greedy_by_prompt = list(all_answers)
 
-    return merged_qa, merged_prompts, all_answers, topk_data
+    return merged_qa, merged_prompts, all_answers, topk_data, greedy_by_prompt
 
 
 def _interleave_answers(
@@ -272,13 +299,14 @@ def main(argv: list[str] | None = None) -> None:
     print(f"[gen] Device: {device}")
     print(f"[gen] Model: {config['model_id']}")
 
+    family = model_family(config["model_id"])
+    print(f"[gen] Inference family: {family}")
+
     model, tokenizer, eos_token_ids, ptid, vq_model = _setup_model(config, device)
     dataset_key, qa_pairs, prompts, raw_prompts = _load_or_prepare_inputs(
         config, args, tokenizer, output_dir,
+        multimodal_family=family in MULTIMODAL_FAMILIES,
     )
-
-    family = model_family(config["model_id"])
-    print(f"[gen] Inference family: {family}")
 
     # Multimodal backends (MMaDA mmu, Nemotron-VLM) are taken when the model is a
     # vision model and the dataset carries images (e.g. MathVision). They build
@@ -381,7 +409,7 @@ def main(argv: list[str] | None = None) -> None:
             )
         return generate_fn(prompts=call_prompts, temperature=temperature, **common_kwargs)
 
-    merged_qa, merged_prompts, all_answers, topk_data = _run_generation(
+    merged_qa, merged_prompts, all_answers, topk_data, greedy_by_prompt = _run_generation(
         qa_pairs, gen_prompts, config, gen_one, seed,
     )
 
@@ -406,7 +434,21 @@ def main(argv: list[str] | None = None) -> None:
         parse_answer=parse_answer_fn,
     )
 
+    # Clean per-model results JSONL: one record per original prompt with the
+    # canonical QASample fields, greedy_answer + model_name filled in. Written to
+    # the shared per-dataset folder (outputs/<dataset>/<model_name>.jsonl),
+    # alongside the per-run UQ traces above.
+    model_name = model_name_from_id(config["model_id"])
+    result_samples = []
+    for i, qa in enumerate(qa_pairs):
+        sample = {k: v for k, v in qa.items() if k != "image"}
+        sample["greedy_answer"] = greedy_by_prompt[i] if i < len(greedy_by_prompt) else None
+        sample["model_name"] = model_name
+        result_samples.append(sample)
+    clean_path = write_results_jsonl(dataset_key, model_name, result_samples)
+
     print(f"\nSaved to: {output_dir}")
+    print(f"Clean results: {clean_path}")
     print(f"Examples: {summary['num_examples']}")
 
 

@@ -1,69 +1,29 @@
-"""Tests for src.datasets.gsm8k adapter."""
+"""Tests for the gsm8k adapter (canonical QASample contract)."""
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "src"))
-
-from datasets.gsm8k import (
-    extract_final_answer,
-    extract_question_and_answer,
-    format_prompt,
-    normalize_answer,
-    parse_response,
-)
+from src.datasets.dataset_specific.gsm8k import extract_qa_sample, format_prompt
 
 
-class TestExtractFinalAnswer:
-    def test_with_marker(self):
-        assert extract_final_answer("Step 1: ... #### 42") == "42"
+class TestExtractQaSample:
+    def test_canonical_fields(self):
+        example = {"question": "How many apples?", "answer": "5 apples\n#### 5"}
+        s = extract_qa_sample(example, "7")
+        assert s["id"] == "7"
+        assert s["image_id"] == "7"          # text-only: image_id mirrors id
+        assert s["question"] == "How many apples?"
+        assert s["ground_truth_answer"] == "5 apples\n#### 5"
+        assert s["dataset_name"] == "gsm8k"
+        assert s["split"] == "test"
+        assert s["model_name"] is None
+        assert "image" not in s              # never carries an image
 
-    def test_decimal(self):
-        assert extract_final_answer("#### 3.14") == "3.14"
-
-    def test_no_marker_fallback(self):
-        assert extract_final_answer("The answer is 7") == "7"
-
-
-class TestParseResponse:
-    def test_marker(self):
-        assert parse_response("Some work\n#### 100") == "100"
-
-    def test_number_only(self):
-        assert parse_response("42") == "42"
-
-    def test_empty(self):
-        assert parse_response("no numbers here") == ""
-
-
-class TestNormalizeAnswer:
-    def test_integer(self):
-        assert normalize_answer("#### 42") == "42"
-
-    def test_decimal(self):
-        assert normalize_answer("#### 3.14") == "3.14"
-
-    def test_trailing_zeros(self):
-        assert normalize_answer("#### 3.0") == "3"
-
-
-class TestExtractQuestionAndAnswer:
-    def test_basic(self):
-        example = {
-            "question": "If you have 3 apples and get 2 more, how many do you have?",
-            "answer": "3 + 2 = 5\n#### 5",
-        }
-        qa = extract_question_and_answer(example)
-        assert qa["question"] == "If you have 3 apples and get 2 more, how many do you have?"
-        assert qa["reference_answer"] == "5"
+    def test_full_prompt_precomputed(self):
+        s = extract_qa_sample({"question": "Q?", "answer": "#### 1"}, "0")
+        assert s["full_prompt"] == format_prompt("Q?")
+        assert "Q?" in s["full_prompt"]
 
 
 class TestFormatPrompt:
-    def test_includes_question(self):
+    def test_includes_question_and_answer_marker(self):
         prompt = format_prompt("How many apples?")
         assert "How many apples?" in prompt
         assert "#### [answer]" in prompt
-
-    def test_with_prefix(self):
-        prompt = format_prompt("How many?", prefix="Example: ...")
-        assert "Example: ..." in prompt

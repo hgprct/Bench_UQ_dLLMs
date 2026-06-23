@@ -49,6 +49,31 @@ def _logits_of(output: Any) -> torch.Tensor:
     return getattr(output, "logits", output)
 
 
+def stack_ragged_topk(tensors: list[torch.Tensor], pad_value: float) -> torch.Tensor:
+    """Right-pad a list of ``[1, L_i, k]`` top-k tensors to a common length and
+    stack to ``[N, Lmax, k]``.
+
+    Nemotron generates one prompt at a time and the answer region
+    (``out_ids[:, prompt_len:]``) has a *different* length per prompt -- prompts
+    differ in length, and the model pads the whole sequence to a fixed total, so
+    longer prompts leave a shorter answer span. The per-prompt top-k tensors
+    therefore disagree on their sequence dim and cannot be ``torch.cat``-ed
+    directly. Pad each to the longest answer span in this call. Padded positions
+    are placeholders (no real token); downstream UQ should mask by answer length
+    if it consumes them.
+    """
+    if not tensors:
+        return torch.empty(0)
+    max_len = max(t.shape[1] for t in tensors)
+    out = []
+    for t in tensors:
+        if t.shape[1] < max_len:
+            pad = t.new_full((t.shape[0], max_len - t.shape[1], t.shape[2]), pad_value)
+            t = torch.cat([t, pad], dim=1)
+        out.append(t)
+    return torch.cat(out, dim=0)
+
+
 @torch.no_grad()
 def generate(
     model: Any,
@@ -123,7 +148,7 @@ def generate(
             torch.cuda.empty_cache()
 
     topk_data = {
-        "topk_logprobs": torch.cat(topk_logprobs_batches, dim=0),
-        "topk_token_ids": torch.cat(topk_ids_batches, dim=0),
+        "topk_logprobs": stack_ragged_topk(topk_logprobs_batches, 0.0),
+        "topk_token_ids": stack_ragged_topk(topk_ids_batches, 0.0),
     }
     return all_answers, topk_data

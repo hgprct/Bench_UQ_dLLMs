@@ -38,10 +38,12 @@ class Dataset(str, Enum):
     musique             = "musique"
     mathvision          = "mathvision"
     competition_math    = "competition_math"
+    champ               = "champ"
     medmcqa             = "medmcqa"
     livebench_reasoning = "livebench_reasoning"
     vqa_rad             = "vqa_rad"
-    drive_bench         = "drive_bench"
+    drivingvqa          = "drivingvqa"
+    okvqa               = "okvqa"
     vilp                = "vilp"
 
 
@@ -82,6 +84,18 @@ MMADA_VQ_MODEL_ID: str = "showlab/magvitv2"
 #   "dream"        Dream-v0-Instruct  -> dream.generate (diffusion_generate)
 #   "nemotron"     Nemotron-Diffusion -> nemotron_diffusion.generate (text)
 #   "nemotron_vlm" Nemotron-Diff-VLM  -> nemotron_vlm.generate_vlm (image+text)
+
+def model_name_from_id(model_id: str) -> str:
+    """Return the short ``Model`` enum value for an HF id.
+
+    Falls back to the last path component for ids not in ``MODEL_HF_IDS`` so the
+    result is always safe to use as a filename / ``model_name`` field value.
+    """
+    for model, hf_id in MODEL_HF_IDS.items():
+        if hf_id == model_id:
+            return model.value
+    return str(model_id).rstrip("/").split("/")[-1]
+
 
 def model_family(model_id: str) -> str:
     """Resolve an HF model id to its inference-backend family key."""
@@ -147,11 +161,14 @@ DATASET_CONFIGS: dict[Dataset, DatasetConfig] = {
         steps           = 256,
         block_size      = 32,
     ),
+    # TriviaQA. Loaded from the local sampled CSV (1000 questions) rather than
+    # the HF dataset mandarjoshi/trivia_qa so generation works offline. Each row
+    # is id,question,answer where answer is a Python-literal list of aliases.
     Dataset.triviaqa: DatasetConfig(
         hf_name         = "mandarjoshi/trivia_qa",
-        local_path      = None,
-        config_name     = "rc",
-        split           = "validation",
+        local_path      = "trivia_qa/sampled/test.csv",
+        config_name     = None,
+        split           = "test",
         label_method    = "llm_judge",
         label_gpu_mode  = "gpu",
         fewshot_k       = 0,
@@ -255,6 +272,23 @@ DATASET_CONFIGS: dict[Dataset, DatasetConfig] = {
         steps           = 256,
         block_size      = 32,
     ),
+    # CHAMP challenging competition maths (270 problems). Loaded from the slim
+    # local JSONL built by scripts/prepare_champ.py from CHAMP/v0.json. Answers
+    # are symbolic / multi-form, so judged (LLM) for mathematical equivalence
+    # rather than exact-match. Longer generation budget for step-by-step work.
+    Dataset.champ: DatasetConfig(
+        hf_name         = "",
+        local_path      = "CHAMP/champ.jsonl",
+        config_name     = None,
+        split           = "train",
+        label_method    = "llm_judge",
+        label_gpu_mode  = "gpu",
+        fewshot_k       = 0,
+        batch_size      = 8,
+        max_gen_length  = 512,
+        steps           = 512,
+        block_size      = 32,
+    ),
     # Medical multiple-choice (4 options). cop = correct option index a/b/c/d.
     # Judged (verbose CoT answers) against the correct option text + letter.
     Dataset.medmcqa: DatasetConfig(
@@ -300,12 +334,12 @@ DATASET_CONFIGS: dict[Dataset, DatasetConfig] = {
         steps           = 128,
         block_size      = 32,
     ),
-    # Driving-scene VQA (DriveBench arena). Multimodal: uses the CAM_FRONT view.
-    # NOTE: the dataset ships image *paths* into nuScenes, not pixels -- set
-    # DRIVE_BENCH_IMAGE_ROOT to the nuScenes root (see drive_bench.py).
-    Dataset.drive_bench: DatasetConfig(
-        hf_name         = "drive-bench/arena",
-        local_path      = None,
+    # DrivingVQA driving-theory VQA (image + multiple-choice). Multimodal. Loaded
+    # from the local JSONL built by scripts/prepare_drivingvqa.py from test.json.
+    # One or more options may be correct, so judged (LLM) against the option set.
+    Dataset.drivingvqa: DatasetConfig(
+        hf_name         = "",
+        local_path      = "datasets/DrivingVQA/test.jsonl",
         config_name     = None,
         split           = "test",
         label_method    = "llm_judge",
@@ -315,6 +349,22 @@ DATASET_CONFIGS: dict[Dataset, DatasetConfig] = {
         max_gen_length  = 256,
         steps           = 128,
         block_size      = 64,
+    ),
+    # OK-VQA outside-knowledge VQA (image + short free-form answer). Multimodal.
+    # Loaded from the local JSONL built by scripts/prepare_okvqa.py joining the
+    # COCO val2014 questions + annotations (GT = majority of 10 human answers).
+    Dataset.okvqa: DatasetConfig(
+        hf_name         = "",
+        local_path      = "datasets/OKVQA/test.jsonl",
+        config_name     = None,
+        split           = "test",
+        label_method    = "llm_judge",
+        label_gpu_mode  = "gpu",
+        fewshot_k       = 0,
+        batch_size      = 8,
+        max_gen_length  = 128,
+        steps           = 128,
+        block_size      = 32,
     ),
     # ViLP visual-language-priors probe. Each row = one question + three
     # (image, answer) variants; the adapter fans it out into three samples.

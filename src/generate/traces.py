@@ -81,7 +81,8 @@ def _build_answer_records(
         parsed = parse_answer(answer) if parse_answer else None
         record = dict(qa) if isinstance(qa, dict) else {}
         if not record.get("aliases"):
-            record["aliases"] = [record.get("reference_answer", "")]
+            gt = record.get("ground_truth_answer")
+            record["aliases"] = gt if isinstance(gt, list) else [gt if gt is not None else ""]
         record.update({
             "example_id": _example_id(qa, i),
             "sample_id": i,

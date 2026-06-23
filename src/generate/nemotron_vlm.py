@@ -48,6 +48,8 @@ import torch.nn.functional as F
 from PIL import Image
 from tqdm import tqdm
 
+from src.generate.nemotron_diffusion import stack_ragged_topk
+
 _PROCESS_MESSAGES_CACHE: dict[str, Callable] = {}
 
 
@@ -182,8 +184,10 @@ def generate_vlm(
         if is_cuda:
             torch.cuda.empty_cache()
 
+    # Per-(image,prompt) answer spans differ in length -> pad to a common length
+    # before stacking (same ragged-length issue as the text backend).
     topk_data = {
-        "topk_logprobs": torch.cat(topk_logprobs_batches, dim=0),
-        "topk_token_ids": torch.cat(topk_ids_batches, dim=0),
+        "topk_logprobs": stack_ragged_topk(topk_logprobs_batches, 0.0),
+        "topk_token_ids": stack_ragged_topk(topk_ids_batches, 0.0),
     }
     return all_answers, topk_data

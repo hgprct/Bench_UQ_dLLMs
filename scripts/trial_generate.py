@@ -61,7 +61,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
 
     from src.config import Dataset, resolve_remasking
-    from src.datasets.dataloader import prepare_dataset_inputs
+    from src.generate.inputs import prepare_dataset_inputs
     from src.generate import generate as generate_fn
     from src.generate.model import (
         infer_eos_token_ids, infer_mask_token_id,

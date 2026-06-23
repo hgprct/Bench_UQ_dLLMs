@@ -23,12 +23,12 @@ def load_local_dataset(
     path: str | Path,
     file_format: str | None = None,
 ) -> Any:
-    """Load a dataset from a local file (jsonl, json, or parquet).
+    """Load a dataset from a local file (jsonl, json, csv, or parquet).
 
     The format is inferred from the file extension unless *file_format* is given.
     Parquet returns a ``datasets.Dataset`` (supports ``len`` and integer indexing
-    like an HF dataset, and decodes Image/struct features); json/jsonl return a
-    ``list[dict]``. Both are consumed identically by ``build_raw_prompts``.
+    like an HF dataset, and decodes Image/struct features); json/jsonl/csv return a
+    ``list[dict]``. All are consumed identically by ``build_raw_prompts``.
     """
     path = Path(path)
     if not path.exists():
@@ -38,6 +38,10 @@ def load_local_dataset(
     if fmt == "jsonl":
         from src.utils.io import read_jsonl
         return read_jsonl(path)
+    elif fmt == "csv":
+        import csv
+        with path.open(newline="", encoding="utf-8") as f:
+            return list(csv.DictReader(f))
     elif fmt == "json":
         from src.utils.io import read_json
         data = read_json(path)

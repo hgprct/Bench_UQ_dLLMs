@@ -10,6 +10,7 @@ __pycache__/
 # Outputs / Experiments
 # =========================
 outputs*/
+datasets/*
 
 runs/
 wandb/
